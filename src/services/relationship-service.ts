@@ -12,6 +12,11 @@ import {
   unwrap,
   updateRow
 } from "./domain-service-utils.js";
+import {
+  validateRelationshipCreateCommand,
+  validateRelationshipInvoiceModeCommand,
+  validateRelationshipRiskProfileCommand
+} from "./domain-validation-layer.js";
 
 export interface RelationshipService {
   createRelationship(auth: AuthContext, body: BodyRecord): Promise<unknown>;
@@ -76,6 +81,7 @@ export function createRelationshipService(
 ): RelationshipService {
   return {
     async createRelationship(auth, body) {
+      validateRelationshipCreateCommand(body);
       const buyerId = requireString(body, "buyerId");
       const supplierId = requireString(body, "supplierId");
       const invoiceMode = requireInvoiceMode(body);
@@ -115,6 +121,7 @@ export function createRelationshipService(
     },
 
     async updateRelationshipInvoiceMode(auth, relationshipId, body) {
+      validateRelationshipInvoiceModeCommand(body);
       const invoiceMode = requireInvoiceMode(body);
       const client = getClient();
 
@@ -142,6 +149,7 @@ export function createRelationshipService(
     },
 
     async upsertRelationshipRiskProfile(auth, relationshipId, body) {
+      validateRelationshipRiskProfileCommand(body);
       const recourseType = requireRecourseType(body);
       const warrantyFlags = stringArrayOrEmpty(body.warrantyRepresentationFlags ?? body.warrantyFlags);
       const delinquencyTerms = {

@@ -6,6 +6,7 @@ import {
   type SupabaseDomainClientProvider,
   badRequest,
   conflict,
+  duplicateHashDetected,
   duplicateHashRegistered,
   hashValidationError,
   incompleteRiskProfile,
@@ -25,6 +26,12 @@ import {
   updateRow,
   validateDueDateAfterIssue
 } from "./domain-service-utils.js";
+import {
+  validateFinanceabilityCommand,
+  validateInvoiceCreateCommand,
+  validateInvoiceHashCommand,
+  validateInvoiceResolutionCommand
+} from "./domain-validation-layer.js";
 
 export interface InvoiceService {
   createInvoice(auth: AuthContext, body: BodyRecord): Promise<unknown>;
@@ -48,7 +55,8 @@ function readStringField(record: BodyRecord, key: string): string | undefined {
 }
 
 const decisionStates = new Set(["ACCEPTED", "PARTIALLY_ACCEPTED", "REJECTED", "DISPUTED", "HELD"]);
-const resolvableInvoiceStates = new Set(["SUBMITTED", "UNDER_REVIEW"]);
+const resolvableInvoiceStates = ["SUBMITTED", "UNDER_REVIEW"] as const;
+const resolvableInvoiceStateSet = new Set<string>(resolvableInvoiceStates);
 const financeableInvoiceStates = new Set(["ACCEPTED", "PARTIALLY_ACCEPTED"]);
 
 function requireDecisionState(body: BodyRecord): string {
@@ -139,6 +147,7 @@ function canonicalizeInvoiceHash(body: BodyRecord) {
 export function createInvoiceService(getClient: SupabaseDomainClientProvider, options: InvoiceServiceOptions = {}): InvoiceService {
   return {
     async createInvoice(auth, body) {
+      validateInvoiceCreateCommand(body);
       const relationshipId = requireString(body, "relationshipId");
       const supplierId = requireString(body, "supplierId");
       const buyerId = requireString(body, "buyerId");
@@ -221,6 +230,7 @@ export function createInvoiceService(getClient: SupabaseDomainClientProvider, op
     },
 
     async createInvoiceResolution(auth, invoiceId, body) {
+      validateInvoiceResolutionCommand(body);
       const decisionState = requireDecisionState(body);
       const acceptedAmount = requireResolutionAmount(body);
       const client = getClient();
@@ -241,8 +251,12 @@ export function createInvoiceService(getClient: SupabaseDomainClientProvider, op
 
       const invoice = invoiceResult.data as BodyRecord;
       const invoiceState = readStringField(invoice, "state");
-      if (!invoiceState || !resolvableInvoiceStates.has(invoiceState)) {
-        throw conflict("Invoice is not in a resolvable state.");
+      if (!invoiceState || !resolvableInvoiceStateSet.has(invoiceState)) {
+        throw conflict("Invoice is not in a resolvable state.", {
+          currentState: invoiceState ?? null,
+          requestedState: decisionState,
+          allowedSourceStates: [...resolvableInvoiceStates]
+        });
       }
 
       const grossAmount = numberOrUndefined(invoice.gross_amount);
@@ -297,6 +311,7 @@ export function createInvoiceService(getClient: SupabaseDomainClientProvider, op
     },
 
     async registerInvoiceHash(auth, invoiceId, body) {
+      validateInvoiceHashCommand(body);
       const { canonicalPayload, hashDigest } = canonicalizeInvoiceHash(body);
       const client = getClient();
 
@@ -345,12 +360,11 @@ export function createInvoiceService(getClient: SupabaseDomainClientProvider, op
         duplicateResult.data && typeof duplicateResult.data === "object" ? (duplicateResult.data as BodyRecord) : null;
       const duplicateOfInvoiceId = duplicateInvoice ? readStringField(duplicateInvoice, "id") ?? null : null;
       if (duplicateOfInvoiceId) {
-        return {
+        throw duplicateHashDetected("Invoice hash matches an existing invoice.", {
+          duplicateOfInvoiceId,
           hashDigest,
-          canonicalPayload,
-          duplicateDetected: true,
-          duplicateOfInvoiceId
-        };
+          canonicalPayload
+        });
       }
 
       await unwrap(
@@ -383,6 +397,7 @@ export function createInvoiceService(getClient: SupabaseDomainClientProvider, op
     },
 
     async evaluateInvoiceFinanceability(auth, invoiceId, body) {
+      validateFinanceabilityCommand(body);
       const client = getClient();
       const invoiceResult = await client
         .from("invoices")
@@ -441,6 +456,12 @@ export function createInvoiceService(getClient: SupabaseDomainClientProvider, op
       const eligibleAmount = requestedEligibleAmount ?? acceptedAmount;
       if (eligibleAmount <= 0 || eligibleAmount > acceptedAmount) {
         throw badRequest("eligibleAmount must be greater than zero and cannot exceed accepted amount.");
+      }
+
+      if (body.isDuplicateBlocked === true) {
+        throw duplicateHashDetected("Duplicate-blocked invoices cannot become financeable.", {
+          invoiceId
+        });
       }
 
       const financeability = await unwrap<BodyRecord>(

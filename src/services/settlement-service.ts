@@ -19,6 +19,7 @@ import {
   updateRow,
   walletReferenceInvalid
 } from "./domain-service-utils.js";
+import { validateSettlementInstructionCommand, validateSettlementStatusCommand } from "./domain-validation-layer.js";
 
 export interface SettlementService {
   createSettlementInstruction(auth: AuthContext, body: BodyRecord): Promise<unknown>;
@@ -201,6 +202,7 @@ export function createSettlementService(
 ): SettlementService {
   return {
     async createSettlementInstruction(auth, body) {
+      validateSettlementInstructionCommand(body);
       const fundingCommitmentId = requireString(body, "fundingCommitmentId");
       const contractId = requireString(body, "contractId");
       const instructionKind = requireInstructionKind(body);
@@ -362,6 +364,7 @@ export function createSettlementService(
     },
 
     async getSettlementStatus(_auth, settlementId) {
+      validateSettlementStatusCommand(settlementId);
       const instruction = await unwrap<BodyRecord>(
         "Read settlement status",
         getClient()

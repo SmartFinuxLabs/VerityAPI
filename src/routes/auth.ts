@@ -19,6 +19,18 @@ function readBodyRecord(body: unknown): Record<string, unknown> {
   return body && typeof body === "object" ? (body as Record<string, unknown>) : {};
 }
 
+function normalizeParticipantRole(value: string): "BUYER" | "SUPPLIER" | "INVESTOR" | undefined {
+  if (value === "BUYER" || value === "Buyer") return "BUYER";
+  if (value === "SUPPLIER" || value === "Supplier") return "SUPPLIER";
+  if (value === "INVESTOR" || value === "Investor") return "INVESTOR";
+  return undefined;
+}
+
+function normalizePartyType(value: string): "BUYER" | "SUPPLIER" | "INVESTOR" | undefined {
+  if (value === "BUYER" || value === "SUPPLIER" || value === "INVESTOR") return value;
+  return undefined;
+}
+
 export type { AuthService };
 
 export function createAuthRouter(authService: AuthService = supabaseAuthService) {
@@ -77,6 +89,13 @@ export function createAuthRouter(authService: AuthService = supabaseAuthService)
         !payload.partyType
       ) {
         throw badRequest("email, password, fullName, entityName, participantRole, and partyType are required.");
+      }
+
+      const participantRole = normalizeParticipantRole(payload.participantRole);
+      const partyType = normalizePartyType(payload.partyType);
+
+      if (!participantRole || !partyType || participantRole !== partyType) {
+        throw badRequest("participantRole and partyType must describe the same buyer, supplier, or investor actor type.");
       }
 
       const result = await authService.register(payload);

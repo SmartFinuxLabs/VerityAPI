@@ -55,12 +55,13 @@ export function notFound(message: string): ApiError {
   });
 }
 
-export function conflict(message: string): ApiError {
+export function conflict(message: string, details?: unknown): ApiError {
   return new ApiError({
     statusCode: 409,
     code: "invalid_invoice_state",
     message,
-    reasonCode: "ERR_CONFLICT"
+    reasonCode: "ERR_CONFLICT",
+    details
   });
 }
 

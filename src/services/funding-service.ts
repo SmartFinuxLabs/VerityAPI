@@ -17,6 +17,7 @@ import {
   requireString,
   unwrap
 } from "./domain-service-utils.js";
+import { validateFundingCommitmentCommand, validateFundingOfferCommand } from "./domain-validation-layer.js";
 
 export interface FundingService {
   createFundingOffer(auth: AuthContext, body: BodyRecord): Promise<unknown>;
@@ -51,6 +52,7 @@ function optionalNonNegativeRate(body: BodyRecord, key: string, fallback = 0): n
 export function createFundingService(getClient: SupabaseDomainClientProvider, options: FundingServiceOptions = {}): FundingService {
   return {
     async createFundingOffer(auth, body) {
+      validateFundingOfferCommand(body);
       const financeabilityId = requireString(body, "financeabilityId");
       const offeredAmount = requirePositiveNumber(body, "offeredAmount");
       const yieldApr = optionalNonNegativeRate(body, "yieldApr");
@@ -119,6 +121,7 @@ export function createFundingService(getClient: SupabaseDomainClientProvider, op
     },
 
     async createFundingCommitment(auth, offerId, body) {
+      validateFundingCommitmentCommand(body);
       const investorId = requireString(body, "investorId");
       const committedAmount = requirePositiveNumber(body, "committedAmount");
       const offeredRate = optionalNonNegativeRate(body, "offeredRate");

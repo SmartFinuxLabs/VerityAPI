@@ -149,4 +149,31 @@ describe("auth routes", () => {
       }
     });
   });
+
+  it("rejects registration with mismatched participant role and party type", async () => {
+    const authService: AuthService = {
+      getRoleHint: jest.fn(),
+      signIn: jest.fn(),
+      register: jest.fn()
+    };
+
+    const response = await request(createAuthTestApp(authService))
+      .post("/api/v1/auth/register")
+      .send({
+        email: "buyer@test.local",
+        password: "secret-password",
+        fullName: "Buyer User",
+        entityName: "Buyer LLC",
+        participantRole: "Buyer",
+        partyType: "SUPPLIER"
+      })
+      .expect(400);
+
+    expect(authService.register).not.toHaveBeenCalled();
+    expect(response.body).toMatchObject({
+      code: "bad_request",
+      reasonCode: "ERR_MISSING_REQUIRED_FIELDS",
+      message: "participantRole and partyType must describe the same buyer, supplier, or investor actor type."
+    });
+  });
 });

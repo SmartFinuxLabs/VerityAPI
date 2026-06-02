@@ -601,11 +601,45 @@ describe("invoice service", () => {
       ).rejects.toMatchObject({
         statusCode: 409,
         code: "invalid_invoice_state",
-        reasonCode: "ERR_CONFLICT"
+        reasonCode: "ERR_CONFLICT",
+        details: {
+          currentState: "FACTORED",
+          requestedState: "ACCEPTED",
+          allowedSourceStates: ["SUBMITTED", "UNDER_REVIEW"]
+        }
       });
       expect(resolutionInsert).not.toHaveBeenCalled();
       expect(invoiceUpdate).not.toHaveBeenCalled();
     });
+
+    it.each(["ACCEPTED", "PARTIALLY_ACCEPTED", "REJECTED", "DISPUTED", "HELD", "CANCELLED", "FACTORED", "SETTLED"])(
+      "rejects resolution transitions from %s with stable reason-code details",
+      async (state) => {
+        const { client, resolutionInsert, invoiceUpdate } = createResolutionClient({
+          invoiceData: {
+            id: "invoice-1",
+            state,
+            gross_amount: 25000
+          }
+        });
+        const service = createService(client);
+
+        await expect(
+          service.createInvoiceResolution(auth, "invoice-1", validResolutionPayload)
+        ).rejects.toMatchObject({
+          statusCode: 409,
+          code: "invalid_invoice_state",
+          reasonCode: "ERR_CONFLICT",
+          details: {
+            currentState: state,
+            requestedState: "ACCEPTED",
+            allowedSourceStates: ["SUBMITTED", "UNDER_REVIEW"]
+          }
+        });
+        expect(resolutionInsert).not.toHaveBeenCalled();
+        expect(invoiceUpdate).not.toHaveBeenCalled();
+      }
+    );
   });
 
   describe("deterministic invoice hash registration", () => {
@@ -675,6 +709,28 @@ describe("invoice service", () => {
       });
     });
 
+    it("returns the same digest for semantically identical numeric precision variants", async () => {
+      const { client } = createHashRegistrationClient({
+        updatedInvoiceData: {
+          id: "invoice-1",
+          hash_digest: hashDigest,
+          canonical_payload: canonicalPayload
+        }
+      });
+      const service = createService(client);
+
+      await expect(
+        service.registerInvoiceHash(auth, "invoice-1", {
+          ...hashPayload,
+          grossInvoiceAmount: "100000.0",
+          acceptedAmountAtRegistration: 100000.004
+        })
+      ).resolves.toMatchObject({
+        hashDigest,
+        canonicalPayload
+      });
+    });
+
     it("rejects invalid hash dates before persistence", async () => {
       const { client, update } = createHashRegistrationClient();
       const service = createService(client);
@@ -692,7 +748,7 @@ describe("invoice service", () => {
       expect(update).not.toHaveBeenCalled();
     });
 
-    it("returns duplicate detection details without registering an exact duplicate digest", async () => {
+    it("blocks exact duplicate digest registration with stable duplicate reason code", async () => {
       const { client, update } = createHashRegistrationClient({
         existingDuplicateData: {
           id: "invoice-original"
@@ -700,11 +756,15 @@ describe("invoice service", () => {
       });
       const service = createService(client);
 
-      await expect(service.registerInvoiceHash(auth, "invoice-1", hashPayload)).resolves.toEqual({
-        hashDigest,
-        canonicalPayload,
-        duplicateDetected: true,
-        duplicateOfInvoiceId: "invoice-original"
+      await expect(service.registerInvoiceHash(auth, "invoice-1", hashPayload)).rejects.toMatchObject({
+        statusCode: 409,
+        code: "duplicate_hash_detected",
+        reasonCode: "HASH_DUPLICATE_DETECTED",
+        details: {
+          duplicateOfInvoiceId: "invoice-original",
+          hashDigest,
+          canonicalPayload
+        }
       });
       expect(update).not.toHaveBeenCalled();
     });
@@ -918,6 +978,27 @@ describe("invoice service", () => {
         statusCode: 400,
         code: "incomplete_risk_profile",
         reasonCode: "ERR_INCOMPLETE_RISK_PROFILE"
+      });
+      expect(financeabilityInsert).not.toHaveBeenCalled();
+    });
+
+    it("blocks duplicate-marked invoices from progressing to eligible financeability", async () => {
+      const { client, financeabilityInsert } = createFinanceabilityClient();
+      const service = createService(client);
+
+      await expect(
+        service.evaluateInvoiceFinanceability(auth, "invoice-1", {
+          resolutionId: "resolution-1",
+          riskMode: "LOW",
+          isDuplicateBlocked: true
+        })
+      ).rejects.toMatchObject({
+        statusCode: 409,
+        code: "duplicate_hash_detected",
+        reasonCode: "HASH_DUPLICATE_DETECTED",
+        details: {
+          invoiceId: "invoice-1"
+        }
       });
       expect(financeabilityInsert).not.toHaveBeenCalled();
     });

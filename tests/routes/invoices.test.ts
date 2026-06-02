@@ -1,6 +1,7 @@
 import { describe, expect, it, jest } from "@jest/globals";
 import express from "express";
 import request from "supertest";
+import { ApiError } from "../../src/errors/api-error.js";
 import { errorHandler } from "../../src/middleware/error-handler.js";
 import { createInvoicesRouter } from "../../src/routes/invoices.js";
 import type { Phase1DomainService } from "../../src/services/phase1-domain.js";
@@ -137,6 +138,56 @@ describe("invoice routes", () => {
     });
   });
 
+  it("returns stable transition reason codes for invalid invoice resolution attempts", async () => {
+    const domainService = createDomainService({
+      createInvoiceResolution: jest.fn(async () => {
+        throw new ApiError({
+          statusCode: 409,
+          code: "invalid_invoice_state",
+          message: "Invoice is not in a resolvable state.",
+          reasonCode: "ERR_CONFLICT",
+          details: {
+            currentState: "SETTLED",
+            requestedState: "ACCEPTED",
+            allowedSourceStates: ["SUBMITTED", "UNDER_REVIEW"]
+          }
+        });
+      })
+    });
+    const payload = {
+      decisionState: "ACCEPTED",
+      acceptedAmount: 25000,
+      decisionReason: "Buyer accepted invoice",
+      reasonCode: "BUYER_APPROVED"
+    };
+
+    const response = await request(createInvoiceTestApp(domainService))
+      .post("/api/v1/invoices/invoice-1/resolution")
+      .send(payload)
+      .expect(409);
+
+    expect(domainService.createInvoiceResolution).toHaveBeenCalledWith(
+      {
+        userId: "user-1",
+        participantRole: "SUPPLIER",
+        organizationRole: "MEMBER"
+      },
+      "invoice-1",
+      payload
+    );
+    expect(response.body).toEqual({
+      code: "invalid_invoice_state",
+      message: "Invoice is not in a resolvable state.",
+      correlationId: "unknown",
+      reasonCode: "ERR_CONFLICT",
+      details: {
+        currentState: "SETTLED",
+        requestedState: "ACCEPTED",
+        allowedSourceStates: ["SUBMITTED", "UNDER_REVIEW"]
+      }
+    });
+  });
+
   it("registers deterministic invoice hash through the domain service", async () => {
     const domainService = createDomainService({
       registerInvoiceHash: jest.fn(async () => ({
@@ -183,6 +234,62 @@ describe("invoice routes", () => {
     });
   });
 
+  it("returns stable duplicate reason codes for exact invoice hash duplicate attempts", async () => {
+    const domainService = createDomainService({
+      registerInvoiceHash: jest.fn(async () => {
+        throw new ApiError({
+          statusCode: 409,
+          code: "duplicate_hash_detected",
+          message: "Invoice hash matches an existing invoice.",
+          reasonCode: "HASH_DUPLICATE_DETECTED",
+          details: {
+            duplicateOfInvoiceId: "invoice-original",
+            hashDigest: "hash-1",
+            canonicalPayload: "PAYLOAD"
+          }
+        });
+      })
+    });
+    const payload = {
+      supplierEntityId: "supplier-1",
+      buyerEntityId: "buyer-1",
+      invoiceNumber: "INV-2026-001",
+      invoiceIssueDate: "2026-06-01",
+      invoiceCurrency: "USDC",
+      grossInvoiceAmount: 25000,
+      acceptedAmountAtRegistration: 25000,
+      dueDate: "2026-07-01",
+      relationshipId: "rel-1",
+      sourceSystemReference: "erp-invoice-1"
+    };
+
+    const response = await request(createInvoiceTestApp(domainService))
+      .post("/api/v1/invoices/invoice-1/hash")
+      .send(payload)
+      .expect(409);
+
+    expect(domainService.registerInvoiceHash).toHaveBeenCalledWith(
+      {
+        userId: "user-1",
+        participantRole: "SUPPLIER",
+        organizationRole: "MEMBER"
+      },
+      "invoice-1",
+      payload
+    );
+    expect(response.body).toEqual({
+      code: "duplicate_hash_detected",
+      message: "Invoice hash matches an existing invoice.",
+      correlationId: "unknown",
+      reasonCode: "HASH_DUPLICATE_DETECTED",
+      details: {
+        duplicateOfInvoiceId: "invoice-original",
+        hashDigest: "hash-1",
+        canonicalPayload: "PAYLOAD"
+      }
+    });
+  });
+
   it("evaluates invoice financeability through the domain service", async () => {
     const domainService = createDomainService({
       evaluateInvoiceFinanceability: jest.fn(async () => ({
@@ -225,6 +332,51 @@ describe("invoice routes", () => {
         status: "ELIGIBLE",
         reasonCode: "FINANCEABLE_ACCEPTED_VALUE",
         isDuplicateBlocked: false
+      }
+    });
+  });
+
+  it("returns stable duplicate reason codes for duplicate-blocked financeability attempts", async () => {
+    const domainService = createDomainService({
+      evaluateInvoiceFinanceability: jest.fn(async () => {
+        throw new ApiError({
+          statusCode: 409,
+          code: "duplicate_hash_detected",
+          message: "Duplicate-blocked invoices cannot become financeable.",
+          reasonCode: "HASH_DUPLICATE_DETECTED",
+          details: {
+            invoiceId: "invoice-1"
+          }
+        });
+      })
+    });
+    const payload = {
+      resolutionId: "resolution-1",
+      riskMode: "LOW",
+      isDuplicateBlocked: true
+    };
+
+    const response = await request(createInvoiceTestApp(domainService))
+      .post("/api/v1/invoices/invoice-1/financeability")
+      .send(payload)
+      .expect(409);
+
+    expect(domainService.evaluateInvoiceFinanceability).toHaveBeenCalledWith(
+      {
+        userId: "user-1",
+        participantRole: "SUPPLIER",
+        organizationRole: "MEMBER"
+      },
+      "invoice-1",
+      payload
+    );
+    expect(response.body).toEqual({
+      code: "duplicate_hash_detected",
+      message: "Duplicate-blocked invoices cannot become financeable.",
+      correlationId: "unknown",
+      reasonCode: "HASH_DUPLICATE_DETECTED",
+      details: {
+        invoiceId: "invoice-1"
       }
     });
   });

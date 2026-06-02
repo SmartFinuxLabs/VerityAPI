@@ -4,8 +4,11 @@ import { ApiError } from "../errors/api-error.js";
 import { emitAuditEvent, queryAuditEvents as queryAuditEventRows, type AuditQuery } from "./audit-service.js";
 import type { AuthContext } from "./auth-token.js";
 import {
+  badRequest,
   type BodyRecord,
+  conflict,
   type SupabaseDomainClient,
+  requireString,
   requiredString,
   unwrap,
   updateRow
@@ -40,6 +43,55 @@ function notConfigured(): ApiError {
   });
 }
 
+type OnboardingPartyType = "BUYER" | "SUPPLIER" | "INVESTOR";
+type InvitationType = "ORG_USER" | "SUPPLIER_ORG";
+type OnboardingOrgRole = "SUPER_USER" | "MEMBER" | "VIEWER";
+
+function requireOnboardingPartyType(body: BodyRecord, key: string): OnboardingPartyType {
+  const value = requireString(body, key);
+  if (value !== "BUYER" && value !== "SUPPLIER" && value !== "INVESTOR") {
+    throw badRequest(`${key} must be BUYER, SUPPLIER, or INVESTOR for Phase 1 onboarding.`);
+  }
+  return value;
+}
+
+function requireInvitationType(body: BodyRecord): InvitationType {
+  const value = requiredString(body, "invitationType") ?? "ORG_USER";
+  if (value !== "ORG_USER" && value !== "SUPPLIER_ORG") {
+    throw badRequest("invitationType must be ORG_USER or SUPPLIER_ORG.");
+  }
+  return value;
+}
+
+function requireOrganizationRole(body: BodyRecord, fallback: OnboardingOrgRole): OnboardingOrgRole {
+  const value =
+    requiredString(body, "organizationRole") ??
+    requiredString(body, "orgRole") ??
+    requiredString(body, "targetOrgRole") ??
+    fallback;
+
+  if (value !== "SUPER_USER" && value !== "MEMBER" && value !== "VIEWER") {
+    throw badRequest("organizationRole must be SUPER_USER, MEMBER, or VIEWER.");
+  }
+
+  return value;
+}
+
+function mapOnboardingRpcError(operation: string, error?: { message?: string } | null): ApiError {
+  const message = error?.message?.toLowerCase() ?? "";
+  if (message.includes("duplicate") || message.includes("unique")) {
+    return conflict("Organization already exists for this registration number or user.");
+  }
+
+  return new ApiError({
+    statusCode: 500,
+    code: "domain_operation_failed",
+    message: `${operation} failed.`,
+    reasonCode: "ERR_INTERNAL_SERVER_ERROR",
+    details: error?.message
+  });
+}
+
 export function createSupabasePhase1DomainService(options: Phase1DomainServiceOptions): Phase1DomainService {
   const createClient =
     options.createClient ??
@@ -69,26 +121,32 @@ export function createSupabasePhase1DomainService(options: Phase1DomainServiceOp
 
     async provisionOrganization(auth, body) {
       const client = getClient();
-      const organizationId = (await unwrap(
-        "Provision organization",
-        client.rpc("provision_organization_with_super_user", {
-          p_legal_name: requiredString(body, "legalName") ?? requiredString(body, "entityName"),
-          p_party_type: requiredString(body, "partyType") ?? auth.participantRole,
-          p_user_id: auth.userId,
-          p_email: requiredString(body, "email"),
-          p_full_name: requiredString(body, "fullName"),
-          p_registration_no: requiredString(body, "registrationNo"),
-          p_risk_profile: body.riskProfile ?? {}
-        })
-      )) as string;
+      const partyType = requireOnboardingPartyType(body, "partyType");
+      const email = requireString(body, "email");
+      const legalName = requiredString(body, "legalName") ?? requiredString(body, "entityName");
+      const organizationIdResult = await client.rpc("provision_organization_with_super_user", {
+        p_legal_name: requireString({ legalName }, "legalName"),
+        p_party_type: partyType,
+        p_user_id: auth.userId,
+        p_email: email,
+        p_full_name: requireString(body, "fullName"),
+        p_registration_no: requireString(body, "registrationNo"),
+        p_risk_profile: body.riskProfile ?? {}
+      });
+
+      if (organizationIdResult.error) {
+        throw mapOnboardingRpcError("Provision organization", organizationIdResult.error);
+      }
+
+      const organizationId = (organizationIdResult.data ?? {}) as string;
 
       await emitAuditEvent(client, auth, {
         aggregateType: "ORGANIZATION",
         aggregateId: organizationId,
         eventType: "ORGANIZATION_PROVISIONED",
         payload: {
-          partyType: requiredString(body, "partyType") ?? auth.participantRole,
-          email: requiredString(body, "email")
+          partyType,
+          email
         }
       });
 
@@ -108,10 +166,11 @@ export function createSupabasePhase1DomainService(options: Phase1DomainServiceOp
 
     async updateMembershipRole(auth, membershipId, body) {
       const client = getClient();
+      const organizationRole = requireOrganizationRole(body, "MEMBER");
       const membership = await unwrap(
         "Update membership role",
         updateRow(client, "party_memberships", membershipId, {
-          org_role: requiredString(body, "organizationRole") ?? requiredString(body, "orgRole"),
+          org_role: organizationRole,
           updated_at: new Date().toISOString()
         })
       );
@@ -121,7 +180,7 @@ export function createSupabasePhase1DomainService(options: Phase1DomainServiceOp
         aggregateId: membershipId,
         eventType: "MEMBERSHIP_ROLE_UPDATED",
         payload: {
-          organizationRole: requiredString(body, "organizationRole") ?? requiredString(body, "orgRole")
+          organizationRole
         }
       });
 
@@ -130,16 +189,31 @@ export function createSupabasePhase1DomainService(options: Phase1DomainServiceOp
 
     async createOrganizationInvitation(auth, body) {
       const client = getClient();
+      const invitationType = requireInvitationType(body);
+      const targetPartyType = requireOnboardingPartyType(body, "targetPartyType");
+      const targetOrgRole = requireOrganizationRole(
+        body,
+        invitationType === "SUPPLIER_ORG" ? "SUPER_USER" : "MEMBER"
+      );
+
+      if (invitationType === "SUPPLIER_ORG" && (targetPartyType !== "SUPPLIER" || targetOrgRole !== "SUPER_USER")) {
+        throw badRequest("SUPPLIER_ORG invitations must target SUPPLIER with SUPER_USER role.");
+      }
+
+      if (invitationType === "ORG_USER") {
+        requireString(body, "targetOrganizationId");
+      }
+
       const invitationId = (await unwrap(
         "Create organization invitation",
         client.rpc("create_organization_invitation", {
-          p_source_organization_id: requiredString(body, "sourceOrganizationId"),
-          p_invitee_email: requiredString(body, "inviteeEmail"),
-          p_invitation_type: requiredString(body, "invitationType") ?? "ORG_USER",
-          p_target_party_type: requiredString(body, "targetPartyType"),
-          p_target_org_role: requiredString(body, "targetOrgRole") ?? "MEMBER",
+          p_source_organization_id: requireString(body, "sourceOrganizationId"),
+          p_invitee_email: requireString(body, "inviteeEmail"),
+          p_invitation_type: invitationType,
+          p_target_party_type: targetPartyType,
+          p_target_org_role: targetOrgRole,
           p_target_organization_id: requiredString(body, "targetOrganizationId"),
-          p_expires_at: requiredString(body, "expiresAt")
+          p_expires_at: requireString(body, "expiresAt")
         })
       )) as string;
 
@@ -148,9 +222,9 @@ export function createSupabasePhase1DomainService(options: Phase1DomainServiceOp
         aggregateId: invitationId,
         eventType: "ORGANIZATION_INVITATION_CREATED",
         payload: {
-          sourceOrganizationId: requiredString(body, "sourceOrganizationId"),
-          inviteeEmail: requiredString(body, "inviteeEmail"),
-          targetPartyType: requiredString(body, "targetPartyType")
+          sourceOrganizationId: requireString(body, "sourceOrganizationId"),
+          inviteeEmail: requireString(body, "inviteeEmail"),
+          targetPartyType
         }
       });
 
@@ -164,9 +238,9 @@ export function createSupabasePhase1DomainService(options: Phase1DomainServiceOp
         client.rpc("accept_organization_invitation", {
           p_invitation_token: invitationToken,
           p_user_id: auth.userId,
-          p_full_name: requiredString(body, "fullName"),
-          p_legal_name: requiredString(body, "legalName"),
-          p_registration_no: requiredString(body, "registrationNo"),
+          p_full_name: requireString(body, "fullName"),
+          p_legal_name: requireString(body, "legalName"),
+          p_registration_no: requireString(body, "registrationNo"),
           p_risk_profile: body.riskProfile ?? {}
         })
       )) as string;
