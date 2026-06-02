@@ -5,7 +5,6 @@ import { createSupabasePhase1DomainService } from "../../src/services/phase1-dom
 import { createSupabaseWorkspaceService } from "../../src/services/workspace-state.js";
 
 const runSeededSupabase = process.env.VERITY_SUPABASE_INTEGRATION === "1";
-const describeSeeded = runSeededSupabase ? describe : describe.skip;
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -86,10 +85,15 @@ async function deleteRowsByColumn(
   }
 }
 
-describeSeeded("seeded Supabase Phase 1 integration", () => {
-  const config = runSeededSupabase
-    ? requireSupabaseConfig()
-    : { supabaseUrl: "http://localhost", serviceRoleKey: "not-used" };
+if (!runSeededSupabase) {
+  describe.skip("seeded Supabase Phase 1 integration", () => {
+    it("reads buyer, supplier, and investor workspaces from seeded active memberships", () => {
+      // Opt-in only: requires VERITY_SUPABASE_INTEGRATION=1 and live Supabase credentials.
+    });
+  });
+} else {
+describe("seeded Supabase Phase 1 integration", () => {
+  const config = requireSupabaseConfig();
   const admin = createClient(config.supabaseUrl, config.serviceRoleKey, {
     auth: {
       autoRefreshToken: false,
@@ -276,3 +280,4 @@ describeSeeded("seeded Supabase Phase 1 integration", () => {
     expect(invoiceAuditRows.map((event) => event.eventType)).toContain("INVOICE_RESOLVED");
   });
 });
+}
