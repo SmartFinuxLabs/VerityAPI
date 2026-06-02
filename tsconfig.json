@@ -8,6 +8,8 @@
     "rootDir": "src",
     "strict": true,
     "isolatedModules": true,
+    "esModuleInterop": true,
+    "allowArbitraryExtensions": true,
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
