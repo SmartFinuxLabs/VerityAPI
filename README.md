@@ -37,6 +37,28 @@ Required server-side Supabase values:
 - `npm run test:watch`: Run Jest in watch mode
 - `npm run typecheck`: TypeScript checks without emitting files
 
+## Deploy To Vercel
+
+This project is configured for Vercel serverless deployment using:
+
+- `vercel.json` for runtime and routing
+- `api/index.js` as the Vercel function entrypoint
+
+Deployment notes:
+
+1. Set Vercel project root to `VerityAPI/`.
+2. Keep the default build command (`npm run build`) so `dist/` is generated.
+3. Add required environment variables in Vercel:
+	- `SUPABASE_URL`
+	- `SUPABASE_ANON_KEY`
+	- `SUPABASE_SERVICE_ROLE_KEY`
+	- Optional: `API_BASE_PATH` (defaults to `/api/v1`)
+
+After deployment:
+
+- Root status endpoint: `GET /`
+- Health endpoint: `GET /api/v1/health`
+
 ## Test Auth Tokens
 
 Until Supabase token validation is wired, tests and local contract checks use deterministic bearer tokens:
