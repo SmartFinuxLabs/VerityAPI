@@ -1,7 +1,7 @@
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 import { env } from "../config/env.js";
 import { ApiError } from "../errors/api-error.js";
-import { emitAuditEvent, queryAuditEvents as queryAuditEventRows, type AuditQuery } from "./audit-service.js";
+import { emitDomainAuditEvent, queryAuditEvents as queryAuditEventRows, type AuditQuery } from "./audit-service.js";
 import type { AuthContext } from "./auth-token.js";
 import {
   badRequest,
@@ -30,15 +30,16 @@ export interface Phase1DomainService extends RelationshipService, InvoiceService
 
 interface Phase1DomainServiceOptions {
   url?: string;
+  anonKey?: string;
   serviceRoleKey?: string;
-  createClient?: (url: string, key: string) => SupabaseDomainClient;
+  createClient?: (url: string, key: string, options?: unknown) => SupabaseDomainClient;
 }
 
 function notConfigured(): ApiError {
   return new ApiError({
     statusCode: 500,
     code: "supabase_not_configured",
-    message: "Supabase domain operations are not configured for VerityAPI.",
+    message: "Supabase domain operations require SUPABASE_URL plus SUPABASE_SERVICE_ROLE_KEY, or SUPABASE_ANON_KEY with a verified user access token.",
     reasonCode: "ERR_INTERNAL_SERVER_ERROR"
   });
 }
@@ -95,14 +96,28 @@ function mapOnboardingRpcError(operation: string, error?: { message?: string } |
 export function createSupabasePhase1DomainService(options: Phase1DomainServiceOptions): Phase1DomainService {
   const createClient =
     options.createClient ??
-    ((url, key) => createSupabaseClient(url, key) as unknown as SupabaseDomainClient);
+    ((url, key, clientOptions) => createSupabaseClient(url, key, clientOptions as Parameters<typeof createSupabaseClient>[2]) as unknown as SupabaseDomainClient);
 
-  function getClient(): SupabaseDomainClient {
-    if (!options.url || !options.serviceRoleKey) {
+  function getClient(auth?: AuthContext): SupabaseDomainClient {
+    if (!options.url) {
       throw notConfigured();
     }
 
-    return createClient(options.url, options.serviceRoleKey);
+    if (options.serviceRoleKey) {
+      return createClient(options.url, options.serviceRoleKey);
+    }
+
+    if (options.anonKey && auth?.accessToken) {
+      return createClient(options.url, options.anonKey, {
+        global: {
+          headers: {
+            Authorization: `Bearer ${auth.accessToken}`
+          }
+        }
+      });
+    }
+
+    throw notConfigured();
   }
 
   const relationshipService = createRelationshipService(getClient, { auditEvents: true });
@@ -120,7 +135,7 @@ export function createSupabasePhase1DomainService(options: Phase1DomainServiceOp
     ...settlementService,
 
     async provisionOrganization(auth, body) {
-      const client = getClient();
+      const client = getClient(auth);
       const partyType = requireOnboardingPartyType(body, "partyType");
       const email = requireString(body, "email");
       const legalName = requiredString(body, "legalName") ?? requiredString(body, "entityName");
@@ -140,7 +155,7 @@ export function createSupabasePhase1DomainService(options: Phase1DomainServiceOp
 
       const organizationId = (organizationIdResult.data ?? {}) as string;
 
-      await emitAuditEvent(client, auth, {
+      await emitDomainAuditEvent(client, auth, {
         aggregateType: "ORGANIZATION",
         aggregateId: organizationId,
         eventType: "ORGANIZATION_PROVISIONED",
@@ -156,7 +171,7 @@ export function createSupabasePhase1DomainService(options: Phase1DomainServiceOp
     listMemberships(_auth, organizationId) {
       return unwrap(
         "List organization memberships",
-        getClient()
+        getClient(_auth)
           .from("party_memberships")
           .select("*")
           .eq("organization_id", organizationId)
@@ -165,7 +180,7 @@ export function createSupabasePhase1DomainService(options: Phase1DomainServiceOp
     },
 
     async updateMembershipRole(auth, membershipId, body) {
-      const client = getClient();
+      const client = getClient(auth);
       const organizationRole = requireOrganizationRole(body, "MEMBER");
       const membership = await unwrap(
         "Update membership role",
@@ -175,7 +190,7 @@ export function createSupabasePhase1DomainService(options: Phase1DomainServiceOp
         })
       );
 
-      await emitAuditEvent(client, auth, {
+      await emitDomainAuditEvent(client, auth, {
         aggregateType: "PARTY_MEMBERSHIP",
         aggregateId: membershipId,
         eventType: "MEMBERSHIP_ROLE_UPDATED",
@@ -188,7 +203,7 @@ export function createSupabasePhase1DomainService(options: Phase1DomainServiceOp
     },
 
     async createOrganizationInvitation(auth, body) {
-      const client = getClient();
+      const client = getClient(auth);
       const invitationType = requireInvitationType(body);
       const targetPartyType = requireOnboardingPartyType(body, "targetPartyType");
       const targetOrgRole = requireOrganizationRole(
@@ -217,7 +232,7 @@ export function createSupabasePhase1DomainService(options: Phase1DomainServiceOp
         })
       )) as string;
 
-      await emitAuditEvent(client, auth, {
+      await emitDomainAuditEvent(client, auth, {
         aggregateType: "ORGANIZATION_INVITATION",
         aggregateId: invitationId,
         eventType: "ORGANIZATION_INVITATION_CREATED",
@@ -232,7 +247,7 @@ export function createSupabasePhase1DomainService(options: Phase1DomainServiceOp
     },
 
     async acceptOrganizationInvitation(auth, invitationToken, body) {
-      const client = getClient();
+      const client = getClient(auth);
       const organizationId = (await unwrap(
         "Accept organization invitation",
         client.rpc("accept_organization_invitation", {
@@ -245,7 +260,7 @@ export function createSupabasePhase1DomainService(options: Phase1DomainServiceOp
         })
       )) as string;
 
-      await emitAuditEvent(client, auth, {
+      await emitDomainAuditEvent(client, auth, {
         aggregateType: "ORGANIZATION",
         aggregateId: organizationId,
         eventType: "ORGANIZATION_INVITATION_ACCEPTED",
@@ -259,7 +274,7 @@ export function createSupabasePhase1DomainService(options: Phase1DomainServiceOp
     },
 
     async revokeOrganizationInvitation(auth, invitationId) {
-      const client = getClient();
+      const client = getClient(auth);
       const invitation = await unwrap(
         "Revoke organization invitation",
         updateRow(client, "organization_invitations", invitationId, {
@@ -270,7 +285,7 @@ export function createSupabasePhase1DomainService(options: Phase1DomainServiceOp
         })
       );
 
-      await emitAuditEvent(client, auth, {
+      await emitDomainAuditEvent(client, auth, {
         aggregateType: "ORGANIZATION_INVITATION",
         aggregateId: invitationId,
         eventType: "ORGANIZATION_INVITATION_REVOKED",
@@ -282,13 +297,14 @@ export function createSupabasePhase1DomainService(options: Phase1DomainServiceOp
       return invitation;
     },
 
-    queryAuditEvents(_auth, query) {
-      return queryAuditEventRows(getClient(), query);
+    queryAuditEvents(auth, query) {
+      return queryAuditEventRows(getClient(auth), query);
     }
   };
 }
 
 export const supabasePhase1DomainService = createSupabasePhase1DomainService({
   url: env.supabase.url,
+  anonKey: env.supabase.anonKey,
   serviceRoleKey: env.supabase.serviceRoleKey
 });

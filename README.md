@@ -22,10 +22,13 @@ The API will start on `http://0.0.0.0:8080` by default.
 
 Supabase configuration is owned by `VerityAPI` only. `VerityUI` should call API endpoints and must not receive Supabase URL, anon key, or service-role values in browser environment variables.
 
-Required server-side Supabase values:
+Required server-side Supabase values for API-mode reads and authenticated domain writes:
 
 - `SUPABASE_URL`
 - `SUPABASE_ANON_KEY`
+
+Optional admin/service-role value for trusted backend-only writes, migrations, seeded integration tests, and privileged RPC execution:
+
 - `SUPABASE_SERVICE_ROLE_KEY`
 
 ## Scripts
@@ -51,7 +54,7 @@ Deployment notes:
 3. Add required environment variables in Vercel:
 	- `SUPABASE_URL`
 	- `SUPABASE_ANON_KEY`
-	- `SUPABASE_SERVICE_ROLE_KEY`
+	- Optional but recommended for admin paths: `SUPABASE_SERVICE_ROLE_KEY`
 	- Optional: `API_BASE_PATH` (defaults to `/api/v1`)
 
 After deployment:

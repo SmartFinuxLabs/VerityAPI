@@ -16,10 +16,19 @@ function createInvoiceClient({
     buyer_id: "buyer-org-1",
     supplier_id: "supplier-org-1",
     status: "ACTIVE"
-  }
+  },
+  createdRelationshipData = {
+    id: "rel-auto-1",
+    buyer_id: "buyer-org-1",
+    supplier_id: "supplier-org-1",
+    status: "ACTIVE"
+  },
+  riskProfileData = { id: "risk-profile-1", relationship_id: "rel-auto-1", is_complete: true }
 }: {
   invoiceData?: unknown;
   relationshipData?: unknown;
+  createdRelationshipData?: unknown;
+  riskProfileData?: unknown;
 } = {}) {
   const invoiceMaybeSingle = jest.fn(async () => ({ data: invoiceData, error: null }));
   const invoiceSelect = jest.fn(() => ({ maybeSingle: invoiceMaybeSingle }));
@@ -29,18 +38,35 @@ function createInvoiceClient({
   }));
 
   const relationshipMaybeSingle = jest.fn(async () => ({ data: relationshipData, error: null }));
-  const relationshipEq = jest.fn(() => ({ maybeSingle: relationshipMaybeSingle }));
+  const relationshipPairMaybeSingle = jest.fn(async () => ({ data: relationshipData, error: null }));
+  const relationshipEqSupplier = jest.fn(() => ({ maybeSingle: relationshipPairMaybeSingle }));
+  const relationshipEq = jest.fn((column: string) => {
+    if (column === "id") {
+      return { maybeSingle: relationshipMaybeSingle };
+    }
+    return { eq: relationshipEqSupplier };
+  });
   const relationshipSelect = jest.fn(() => ({ eq: relationshipEq }));
+  const relationshipInsertMaybeSingle = jest.fn(async () => ({ data: createdRelationshipData, error: null }));
+  const relationshipInsertSelect = jest.fn(() => ({ maybeSingle: relationshipInsertMaybeSingle }));
+  const relationshipInsert = jest.fn(() => ({ select: relationshipInsertSelect }));
+
+  const riskProfileMaybeSingle = jest.fn(async () => ({ data: riskProfileData, error: null }));
+  const riskProfileSelect = jest.fn(() => ({ maybeSingle: riskProfileMaybeSingle }));
+  const riskProfileInsert = jest.fn(() => ({ select: riskProfileSelect }));
 
   const from = jest.fn((table: string) => {
     if (table === "relationships") {
-      return { select: relationshipSelect };
+      return { select: relationshipSelect, insert: relationshipInsert };
+    }
+    if (table === "risk_profiles") {
+      return { insert: riskProfileInsert };
     }
     return { insert, update };
   });
   const client = { rpc: jest.fn(), from };
 
-  return { client, insert, relationshipEq };
+  return { client, insert, relationshipEq, relationshipInsert, riskProfileInsert };
 }
 
 function createService(client: ReturnType<typeof createInvoiceClient>["client"]) {
@@ -263,6 +289,115 @@ describe("invoice service", () => {
       created_by: "user-1",
       updated_by: "user-1"
     });
+  });
+
+  it("does not fail invoice creation when domain audit insertion is blocked", async () => {
+    const invoiceInsert = jest.fn(() => ({
+      select: jest.fn(() => ({
+        maybeSingle: jest.fn(async () => ({
+          data: {
+            id: "invoice-1",
+            state: "SUBMITTED"
+          },
+          error: null
+        }))
+      }))
+    }));
+    const auditInsert = jest.fn(() => ({
+      select: jest.fn(() => ({
+        maybeSingle: jest.fn(async () => ({
+          data: null,
+          error: {
+            message: "new row violates row-level security policy for table audit_events"
+          }
+        }))
+      }))
+    }));
+    const relationshipRead = {
+      select: jest.fn(() => ({
+        eq: jest.fn(() => ({
+          maybeSingle: jest.fn(async () => ({
+            data: {
+              id: "rel-1",
+              buyer_id: "buyer-org-1",
+              supplier_id: "supplier-org-1",
+              status: "ACTIVE"
+            },
+            error: null
+          }))
+        }))
+      }))
+    };
+    const client = {
+      rpc: jest.fn(),
+      from: jest.fn((table: string) => {
+        if (table === "relationships") return relationshipRead;
+        if (table === "audit_events") return { insert: auditInsert };
+        return { insert: invoiceInsert };
+      })
+    };
+    const service = createInvoiceService(() => client, { auditEvents: true });
+
+    await expect(service.createInvoice(auth, validInvoicePayload)).resolves.toEqual({
+      id: "invoice-1",
+      state: "SUBMITTED"
+    });
+
+    expect(invoiceInsert).toHaveBeenCalled();
+    expect(auditInsert).toHaveBeenCalled();
+  });
+
+  it("auto-creates an active relationship and complete risk profile when relationshipId is omitted", async () => {
+    const { client, insert, relationshipInsert, riskProfileInsert } = createInvoiceClient({
+      relationshipData: null,
+      invoiceData: {
+        id: "invoice-1",
+        relationship_id: "rel-auto-1",
+        state: "SUBMITTED"
+      }
+    });
+    const service = createService(client);
+    const { relationshipId: _relationshipId, ...payloadWithoutRelationship } = validInvoicePayload;
+
+    await expect(service.createInvoice(auth, payloadWithoutRelationship)).resolves.toEqual({
+      id: "invoice-1",
+      relationship_id: "rel-auto-1",
+      state: "SUBMITTED"
+    });
+
+    expect(relationshipInsert).toHaveBeenCalledWith({
+      buyer_id: "buyer-org-1",
+      supplier_id: "supplier-org-1",
+      invoice_mode: "SUPPLIER_ISSUED",
+      payment_mode: "USDC",
+      status: "ACTIVE",
+      source_system_reference: "AUTO-buyer-org-1-supplier-org-1",
+      created_by: "user-1",
+      updated_by: "user-1"
+    });
+    expect(riskProfileInsert).toHaveBeenCalledWith(expect.objectContaining({
+      relationship_id: "rel-auto-1",
+      recourse_type: "WITH_RECOURSE",
+      warranty_flags: ["NO_DUPLICATE_ASSIGNMENT", "VALID_INVOICE"],
+      delinquency_terms: {
+        buyerObligationTerms: "NET_30_AFTER_ACCEPTANCE",
+        gracePeriodDays: 5,
+        defaultTriggerPolicy: "BUYER_NON_PAYMENT_AFTER_GRACE",
+        disputeEscalationPath: "OPERATIONS_REVIEW"
+      },
+      risk_mode: "LOW",
+      is_complete: true
+    }));
+    expect(riskProfileInsert).not.toHaveBeenCalledWith(expect.objectContaining({
+      buyer_obligation_terms: expect.anything(),
+      warranty_representation_flags: expect.anything(),
+      updated_by: expect.anything()
+    }));
+    expect(insert).toHaveBeenCalledWith(expect.objectContaining({
+      relationship_id: "rel-auto-1",
+      supplier_id: "supplier-org-1",
+      buyer_id: "buyer-org-1"
+    }));
   });
 
   it("rejects missing required invoice fields before persistence", async () => {

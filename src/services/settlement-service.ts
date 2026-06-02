@@ -1,5 +1,5 @@
 import type { AuthContext } from "./auth-token.js";
-import { emitAuditEvent } from "./audit-service.js";
+import { emitDomainAuditEvent } from "./audit-service.js";
 import {
   type BodyRecord,
   type SupabaseDomainClientProvider,
@@ -212,7 +212,7 @@ export function createSettlementService(
       const destinationRef = requireString(body, "destinationRef");
       requireWalletReferences(body);
 
-      const client = getClient();
+      const client = getClient(auth);
 
       const commitmentResult = await client
         .from("funding_commitments")
@@ -304,7 +304,7 @@ export function createSettlementService(
       const instructionId = requireString(instruction, "id");
 
       if (options.auditEvents) {
-        await emitAuditEvent(client, auth, {
+        await emitDomainAuditEvent(client, auth, {
           aggregateType: "SETTLEMENT_INSTRUCTION",
           aggregateId: instructionId,
           eventType: "SETTLEMENT_INSTRUCTION_CREATED",
@@ -347,7 +347,7 @@ export function createSettlementService(
         })
       ).then(async (updatedInstruction) => {
         if (options.auditEvents) {
-          await emitAuditEvent(client, auth, {
+          await emitDomainAuditEvent(client, auth, {
             aggregateType: "SETTLEMENT_INSTRUCTION",
             aggregateId: instructionId,
             eventType: "SETTLEMENT_PROVIDER_SUBMITTED",
@@ -367,7 +367,7 @@ export function createSettlementService(
       validateSettlementStatusCommand(settlementId);
       const instruction = await unwrap<BodyRecord>(
         "Read settlement status",
-        getClient()
+        getClient(_auth)
           .from("settlement_instructions")
           .select("*")
           .eq("id", settlementId)
@@ -392,7 +392,7 @@ export function createSettlementService(
       const reconciledStatus = adapterStatusToInstructionStatus(result.executionStatus);
       const updatedInstruction = await unwrap<BodyRecord>(
         "Update settlement reconciliation status",
-        updateRow(getClient(), "settlement_instructions", settlementId, {
+        updateRow(getClient(_auth), "settlement_instructions", settlementId, {
           execution_status: reconciledStatus,
           executed_at: result.executionStatus === "COMPLETED" ? result.settledAt : null,
           failure_code: result.reasonCode ?? null,
@@ -401,7 +401,7 @@ export function createSettlementService(
       );
 
       if (options.auditEvents) {
-        await emitAuditEvent(getClient(), _auth, {
+        await emitDomainAuditEvent(getClient(_auth), _auth, {
           aggregateType: "SETTLEMENT_INSTRUCTION",
           aggregateId: settlementId,
           eventType: "SETTLEMENT_RECONCILED",

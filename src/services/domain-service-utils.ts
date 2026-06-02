@@ -1,4 +1,5 @@
 import { ApiError } from "../errors/api-error.js";
+import type { AuthContext } from "./auth-token.js";
 
 export type BodyRecord = Record<string, unknown>;
 
@@ -16,7 +17,7 @@ export type SupabaseDomainClient = {
   from(table: string): any;
 };
 
-export type SupabaseDomainClientProvider = () => SupabaseDomainClient;
+export type SupabaseDomainClientProvider = (auth?: AuthContext) => SupabaseDomainClient;
 
 export function operationFailed(operation: string, error?: SupabaseError | null): ApiError {
   return new ApiError({

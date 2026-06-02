@@ -1,5 +1,5 @@
 import type { AuthContext } from "./auth-token.js";
-import { emitAuditEvent } from "./audit-service.js";
+import { emitDomainAuditEvent } from "./audit-service.js";
 import {
   type BodyRecord,
   type SupabaseDomainClientProvider,
@@ -59,7 +59,7 @@ export function createFundingService(getClient: SupabaseDomainClientProvider, op
       const reserveRate = optionalNonNegativeRate(body, "reserveRate");
       const settlementCurrency = requireAssetCode(body, "settlementCurrency");
       const expiresAt = requireString(body, "expiresAt");
-      const client = getClient();
+      const client = getClient(auth);
 
       const financeabilityResult = await client
         .from("financeability_records")
@@ -104,7 +104,7 @@ export function createFundingService(getClient: SupabaseDomainClientProvider, op
       );
 
       if (options.auditEvents) {
-        await emitAuditEvent(client, auth, {
+        await emitDomainAuditEvent(client, auth, {
           aggregateType: "FUNDING_OFFER",
           aggregateId: requireString(offerRecord, "id"),
           eventType: "FUNDING_OFFER_CREATED",
@@ -126,7 +126,7 @@ export function createFundingService(getClient: SupabaseDomainClientProvider, op
       const committedAmount = requirePositiveNumber(body, "committedAmount");
       const offeredRate = optionalNonNegativeRate(body, "offeredRate");
       const commitmentTxRef = requireString(body, "commitmentTxRef");
-      const client = getClient();
+      const client = getClient(auth);
 
       const offerResult = await client
         .from("funding_offers")
@@ -199,7 +199,7 @@ export function createFundingService(getClient: SupabaseDomainClientProvider, op
       );
 
       if (options.auditEvents) {
-        await emitAuditEvent(client, auth, {
+        await emitDomainAuditEvent(client, auth, {
           aggregateType: "FUNDING_COMMITMENT",
           aggregateId: requireString(commitmentRecord, "id"),
           eventType: "FUNDING_COMMITMENT_CREATED",

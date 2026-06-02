@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { AuthContext } from "./auth-token.js";
-import { emitAuditEvent } from "./audit-service.js";
+import { emitDomainAuditEvent } from "./audit-service.js";
 import {
   type BodyRecord,
   type SupabaseDomainClientProvider,
@@ -52,6 +52,24 @@ function readRelationshipField(relationship: BodyRecord, key: string): string | 
 function readStringField(record: BodyRecord, key: string): string | undefined {
   const value = record[key];
   return typeof value === "string" ? value : undefined;
+}
+
+function defaultRiskProfile(relationshipId: string) {
+  return {
+    relationship_id: relationshipId,
+    recourse_type: "WITH_RECOURSE",
+    warranty_flags: ["NO_DUPLICATE_ASSIGNMENT", "VALID_INVOICE"],
+    delinquency_terms: {
+      buyerObligationTerms: "NET_30_AFTER_ACCEPTANCE",
+      gracePeriodDays: 5,
+      defaultTriggerPolicy: "BUYER_NON_PAYMENT_AFTER_GRACE",
+      disputeEscalationPath: "OPERATIONS_REVIEW"
+    },
+    concentration_limit: 500000,
+    credit_ceiling: 1000000,
+    risk_mode: "LOW",
+    is_complete: true
+  };
 }
 
 const decisionStates = new Set(["ACCEPTED", "PARTIALLY_ACCEPTED", "REJECTED", "DISPUTED", "HELD"]);
@@ -148,7 +166,7 @@ export function createInvoiceService(getClient: SupabaseDomainClientProvider, op
   return {
     async createInvoice(auth, body) {
       validateInvoiceCreateCommand(body);
-      const relationshipId = requireString(body, "relationshipId");
+      const requestedRelationshipId = requiredString(body, "relationshipId");
       const supplierId = requireString(body, "supplierId");
       const buyerId = requireString(body, "buyerId");
       const invoiceNumber = requireString(body, "invoiceNumber");
@@ -164,22 +182,53 @@ export function createInvoiceService(getClient: SupabaseDomainClientProvider, op
         throw badRequest("acceptedAmount cannot exceed grossAmount.");
       }
 
-      const client = getClient();
-      const relationshipResult = await client
-        .from("relationships")
-        .select("id,buyer_id,supplier_id,status")
-        .eq("id", relationshipId)
-        .maybeSingle();
+      const client = getClient(auth);
+      const relationshipResult = requestedRelationshipId
+        ? await client
+          .from("relationships")
+          .select("id,buyer_id,supplier_id,status")
+          .eq("id", requestedRelationshipId)
+          .maybeSingle()
+        : await client
+          .from("relationships")
+          .select("id,buyer_id,supplier_id,status")
+          .eq("buyer_id", buyerId)
+          .eq("supplier_id", supplierId)
+          .maybeSingle();
 
       if (relationshipResult.error) {
         throw operationFailed("Read relationship", relationshipResult.error);
       }
 
-      if (!relationshipResult.data || typeof relationshipResult.data !== "object") {
+      if (requestedRelationshipId && (!relationshipResult.data || typeof relationshipResult.data !== "object")) {
         throw notFound("Relationship was not found.");
       }
 
-      const relationship = relationshipResult.data as BodyRecord;
+      const relationship =
+        relationshipResult.data && typeof relationshipResult.data === "object"
+          ? relationshipResult.data as BodyRecord
+          : await unwrap<BodyRecord>(
+            "Create relationship",
+            insertRow(client, "relationships", {
+              buyer_id: buyerId,
+              supplier_id: supplierId,
+              invoice_mode: "SUPPLIER_ISSUED",
+              payment_mode: "USDC",
+              status: "ACTIVE",
+              source_system_reference: `AUTO-${buyerId}-${supplierId}`,
+              created_by: auth.userId,
+              updated_by: auth.userId
+            })
+          );
+      const relationshipId = requireString(relationship, "id");
+
+      if (!relationshipResult.data) {
+        await unwrap(
+          "Create relationship risk profile",
+          insertRow(client, "risk_profiles", defaultRiskProfile(relationshipId))
+        );
+      }
+
       if (readRelationshipField(relationship, "status") !== "ACTIVE") {
         throw invalidRelationshipMode("Relationship must be active for invoice intake.");
       }
@@ -212,7 +261,7 @@ export function createInvoiceService(getClient: SupabaseDomainClientProvider, op
       );
 
       if (options.auditEvents) {
-        await emitAuditEvent(client, auth, {
+        await emitDomainAuditEvent(client, auth, {
           aggregateType: "INVOICE",
           aggregateId: requireString(invoice, "id"),
           eventType: "INVOICE_SUBMITTED",
@@ -233,7 +282,7 @@ export function createInvoiceService(getClient: SupabaseDomainClientProvider, op
       validateInvoiceResolutionCommand(body);
       const decisionState = requireDecisionState(body);
       const acceptedAmount = requireResolutionAmount(body);
-      const client = getClient();
+      const client = getClient(auth);
 
       const invoiceResult = await client
         .from("invoices")
@@ -289,7 +338,7 @@ export function createInvoiceService(getClient: SupabaseDomainClientProvider, op
       );
 
       if (options.auditEvents) {
-        await emitAuditEvent(client, auth, {
+        await emitDomainAuditEvent(client, auth, {
           aggregateType: "INVOICE",
           aggregateId: invoiceId,
           eventType: "INVOICE_RESOLVED",
@@ -313,7 +362,7 @@ export function createInvoiceService(getClient: SupabaseDomainClientProvider, op
     async registerInvoiceHash(auth, invoiceId, body) {
       validateInvoiceHashCommand(body);
       const { canonicalPayload, hashDigest } = canonicalizeInvoiceHash(body);
-      const client = getClient();
+      const client = getClient(auth);
 
       const currentInvoiceResult = await client
         .from("invoices")
@@ -377,7 +426,7 @@ export function createInvoiceService(getClient: SupabaseDomainClientProvider, op
       );
 
       if (options.auditEvents) {
-        await emitAuditEvent(client, auth, {
+        await emitDomainAuditEvent(client, auth, {
           aggregateType: "INVOICE",
           aggregateId: invoiceId,
           eventType: "INVOICE_HASH_REGISTERED",
@@ -398,7 +447,7 @@ export function createInvoiceService(getClient: SupabaseDomainClientProvider, op
 
     async evaluateInvoiceFinanceability(auth, invoiceId, body) {
       validateFinanceabilityCommand(body);
-      const client = getClient();
+      const client = getClient(auth);
       const invoiceResult = await client
         .from("invoices")
         .select("id,relationship_id,state,accepted_amount")
@@ -484,7 +533,7 @@ export function createInvoiceService(getClient: SupabaseDomainClientProvider, op
       );
 
       if (options.auditEvents) {
-        await emitAuditEvent(client, auth, {
+        await emitDomainAuditEvent(client, auth, {
           aggregateType: "FINANCEABILITY",
           aggregateId: requireString(financeability, "id"),
           eventType: "FINANCEABILITY_EVALUATED",

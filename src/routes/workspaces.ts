@@ -39,6 +39,15 @@ export function createWorkspacesRouter(workspaceService: WorkspaceService = supa
     }
   });
 
+  router.get("/workspaces/supplier/analytics", async (_req, res, next) => {
+    try {
+      const data = await workspaceService.getSupplierAnalytics(requireAuthContext(res.locals.auth));
+      res.status(200).json({ data });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   router.get("/workspaces/investor", async (_req, res, next) => {
     try {
       const data = await workspaceService.getInvestorWorkspaceState(requireAuthContext(res.locals.auth));

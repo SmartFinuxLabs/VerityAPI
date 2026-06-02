@@ -95,7 +95,6 @@ export function validateRelationshipRiskProfileCommand(body: BodyRecord) {
 }
 
 export function validateInvoiceCreateCommand(body: BodyRecord) {
-  requireString(body, "relationshipId");
   requireString(body, "supplierId");
   requireString(body, "buyerId");
   requireString(body, "invoiceNumber");

@@ -1,5 +1,5 @@
 import type { AuthContext } from "./auth-token.js";
-import { emitAuditEvent } from "./audit-service.js";
+import { emitDomainAuditEvent } from "./audit-service.js";
 import {
   type BodyRecord,
   type SupabaseDomainClientProvider,
@@ -90,7 +90,7 @@ export function createRelationshipService(
         throw invalidRelationshipMode("buyerId and supplierId must reference different organizations.");
       }
 
-      const client = getClient();
+      const client = getClient(auth);
       const relationship = await unwrap<BodyRecord>(
         "Create relationship",
         insertRow(client, "relationships", {
@@ -105,7 +105,7 @@ export function createRelationshipService(
       );
 
       if (options.auditEvents) {
-        await emitAuditEvent(client, auth, {
+        await emitDomainAuditEvent(client, auth, {
           aggregateType: "RELATIONSHIP",
           aggregateId: requireString(relationship, "id"),
           eventType: "RELATIONSHIP_CREATED",
@@ -123,7 +123,7 @@ export function createRelationshipService(
     async updateRelationshipInvoiceMode(auth, relationshipId, body) {
       validateRelationshipInvoiceModeCommand(body);
       const invoiceMode = requireInvoiceMode(body);
-      const client = getClient();
+      const client = getClient(auth);
 
       const relationship = await unwrap<BodyRecord>(
         "Update relationship invoice mode",
@@ -135,7 +135,7 @@ export function createRelationshipService(
       );
 
       if (options.auditEvents) {
-        await emitAuditEvent(client, auth, {
+        await emitDomainAuditEvent(client, auth, {
           aggregateType: "RELATIONSHIP",
           aggregateId: relationshipId,
           eventType: "RELATIONSHIP_INVOICE_MODE_UPDATED",
@@ -159,7 +159,7 @@ export function createRelationshipService(
         disputeEscalationPath: requiredString(body, "disputeEscalationPath")
       };
 
-      const client = getClient();
+      const client = getClient(auth);
       const riskProfile = (await unwrap<BodyRecord>(
         "Update relationship risk profile",
         insertRow(client, "risk_profiles", {
@@ -175,7 +175,7 @@ export function createRelationshipService(
       )) as BodyRecord;
 
       if (options.auditEvents) {
-        await emitAuditEvent(client, auth, {
+        await emitDomainAuditEvent(client, auth, {
           aggregateType: "RELATIONSHIP",
           aggregateId: relationshipId,
           eventType: "RISK_PROFILE_UPSERTED",

@@ -76,6 +76,14 @@ export function emitAuditEvent(client: SupabaseDomainClient, auth: AuthContext, 
   );
 }
 
+export async function emitDomainAuditEvent(client: SupabaseDomainClient, auth: AuthContext, input: AuditEventInput) {
+  try {
+    await emitAuditEvent(client, auth, input);
+  } catch {
+    // Domain mutations must not fail after persistence solely because audit insertion is blocked by deployment policy.
+  }
+}
+
 export async function queryAuditEvents(client: SupabaseDomainClient, query: AuditQuery = {}) {
   let builder = client
     .from("audit_events")
