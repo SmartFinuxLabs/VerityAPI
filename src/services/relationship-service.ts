@@ -1,4 +1,5 @@
 import type { AuthContext } from "./auth-token.js";
+import { emitAuditEvent } from "./audit-service.js";
 import {
   type BodyRecord,
   type SupabaseDomainClientProvider,
@@ -16,6 +17,10 @@ export interface RelationshipService {
   createRelationship(auth: AuthContext, body: BodyRecord): Promise<unknown>;
   updateRelationshipInvoiceMode(auth: AuthContext, relationshipId: string, body: BodyRecord): Promise<unknown>;
   upsertRelationshipRiskProfile(auth: AuthContext, relationshipId: string, body: BodyRecord): Promise<unknown>;
+}
+
+interface RelationshipServiceOptions {
+  auditEvents?: boolean;
 }
 
 const invoiceModes = new Set(["SUPPLIER_ISSUED", "BUYER_IMPORTED", "SELF_BILLED"]);
@@ -65,7 +70,10 @@ function isRiskProfileComplete(body: BodyRecord, warrantyFlags: string[]): boole
   );
 }
 
-export function createRelationshipService(getClient: SupabaseDomainClientProvider): RelationshipService {
+export function createRelationshipService(
+  getClient: SupabaseDomainClientProvider,
+  options: RelationshipServiceOptions = {}
+): RelationshipService {
   return {
     async createRelationship(auth, body) {
       const buyerId = requireString(body, "buyerId");
@@ -76,9 +84,10 @@ export function createRelationshipService(getClient: SupabaseDomainClientProvide
         throw invalidRelationshipMode("buyerId and supplierId must reference different organizations.");
       }
 
-      return unwrap(
+      const client = getClient();
+      const relationship = await unwrap<BodyRecord>(
         "Create relationship",
-        insertRow(getClient(), "relationships", {
+        insertRow(client, "relationships", {
           buyer_id: buyerId,
           supplier_id: supplierId,
           invoice_mode: invoiceMode,
@@ -88,22 +97,51 @@ export function createRelationshipService(getClient: SupabaseDomainClientProvide
           updated_by: auth.userId
         })
       );
+
+      if (options.auditEvents) {
+        await emitAuditEvent(client, auth, {
+          aggregateType: "RELATIONSHIP",
+          aggregateId: requireString(relationship, "id"),
+          eventType: "RELATIONSHIP_CREATED",
+          payload: {
+            buyerId,
+            supplierId,
+            invoiceMode
+          }
+        });
+      }
+
+      return relationship;
     },
 
     async updateRelationshipInvoiceMode(auth, relationshipId, body) {
       const invoiceMode = requireInvoiceMode(body);
+      const client = getClient();
 
-      return unwrap(
+      const relationship = await unwrap<BodyRecord>(
         "Update relationship invoice mode",
-        updateRow(getClient(), "relationships", relationshipId, {
+        updateRow(client, "relationships", relationshipId, {
           invoice_mode: invoiceMode,
           updated_by: auth.userId,
           updated_at: new Date().toISOString()
         })
       );
+
+      if (options.auditEvents) {
+        await emitAuditEvent(client, auth, {
+          aggregateType: "RELATIONSHIP",
+          aggregateId: relationshipId,
+          eventType: "RELATIONSHIP_INVOICE_MODE_UPDATED",
+          payload: {
+            invoiceMode
+          }
+        });
+      }
+
+      return relationship;
     },
 
-    async upsertRelationshipRiskProfile(_auth, relationshipId, body) {
+    async upsertRelationshipRiskProfile(auth, relationshipId, body) {
       const recourseType = requireRecourseType(body);
       const warrantyFlags = stringArrayOrEmpty(body.warrantyRepresentationFlags ?? body.warrantyFlags);
       const delinquencyTerms = {
@@ -113,9 +151,10 @@ export function createRelationshipService(getClient: SupabaseDomainClientProvide
         disputeEscalationPath: requiredString(body, "disputeEscalationPath")
       };
 
-      return unwrap(
+      const client = getClient();
+      const riskProfile = (await unwrap<BodyRecord>(
         "Update relationship risk profile",
-        insertRow(getClient(), "risk_profiles", {
+        insertRow(client, "risk_profiles", {
           relationship_id: relationshipId,
           recourse_type: recourseType,
           warranty_flags: warrantyFlags,
@@ -125,7 +164,22 @@ export function createRelationshipService(getClient: SupabaseDomainClientProvide
           risk_mode: requiredString(body, "riskMode"),
           is_complete: isRiskProfileComplete(body, warrantyFlags)
         })
-      );
+      )) as BodyRecord;
+
+      if (options.auditEvents) {
+        await emitAuditEvent(client, auth, {
+          aggregateType: "RELATIONSHIP",
+          aggregateId: relationshipId,
+          eventType: "RISK_PROFILE_UPSERTED",
+          payload: {
+            riskProfileId: requiredString(riskProfile, "id"),
+            recourseType,
+            isComplete: riskProfile.is_complete === true
+          }
+        });
+      }
+
+      return riskProfile;
     }
   };
 }

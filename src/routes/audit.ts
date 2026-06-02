@@ -6,9 +6,9 @@ import { readAuthContext } from "./route-utils.js";
 export function createAuditRouter(domainService: Phase1DomainService = supabasePhase1DomainService) {
   const router = Router();
 
-  router.get("/audit/events", requireOperator, async (_req, res, next) => {
+  router.get("/audit/events", requireOperator, async (req, res, next) => {
     try {
-      const data = await domainService.queryAuditEvents(readAuthContext(res.locals.auth));
+      const data = await domainService.queryAuditEvents(readAuthContext(res.locals.auth), req.query);
       res.status(200).json({ data });
     } catch (err) {
       next(err);

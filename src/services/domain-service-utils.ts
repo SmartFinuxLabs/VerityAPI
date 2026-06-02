@@ -110,6 +110,60 @@ export function incompleteRiskProfile(message: string): ApiError {
   });
 }
 
+export function forbidden(message: string): ApiError {
+  return new ApiError({
+    statusCode: 403,
+    code: "forbidden",
+    message,
+    reasonCode: "ERR_FORBIDDEN"
+  });
+}
+
+export function duplicateCommitment(message: string): ApiError {
+  return new ApiError({
+    statusCode: 409,
+    code: "duplicate_commitment",
+    message,
+    reasonCode: "ERR_CONFLICT"
+  });
+}
+
+export function invalidSettlementConfiguration(message: string): ApiError {
+  return new ApiError({
+    statusCode: 400,
+    code: "invalid_settlement_configuration",
+    message,
+    reasonCode: "ERR_INVALID_SETTLEMENT_CONFIGURATION"
+  });
+}
+
+export function walletReferenceInvalid(message: string): ApiError {
+  return new ApiError({
+    statusCode: 400,
+    code: "bad_request",
+    message,
+    reasonCode: "PMODE_INVALID_WALLET_REFERENCE"
+  });
+}
+
+export function idempotencyConflict(message: string): ApiError {
+  return new ApiError({
+    statusCode: 409,
+    code: "idempotency_conflict",
+    message,
+    reasonCode: "ERR_CONFLICT"
+  });
+}
+
+export function providerTimeout(message: string): ApiError {
+  return new ApiError({
+    statusCode: 503,
+    code: "provider_timeout",
+    message,
+    reasonCode: "PROVIDER_TIMEOUT"
+  });
+}
+
 export function requiredString(body: BodyRecord, key: string): string | undefined {
   const value = body[key];
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;

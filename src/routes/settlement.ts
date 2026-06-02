@@ -9,9 +9,10 @@ export function createSettlementRouter(domainService: Phase1DomainService = supa
     try {
       const data = await domainService.createSettlementInstruction(readAuthContext(res.locals.auth), {
         ...readBodyRecord(req.body),
-        fundingCommitmentId: req.params.commitmentId
+        fundingCommitmentId: req.params.commitmentId,
+        idempotencyKey: req.header("Idempotency-Key")
       });
-      res.status(201).json({ data });
+      res.status(202).json({ data });
     } catch (err) {
       next(err);
     }

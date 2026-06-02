@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { AuthContext } from "./auth-token.js";
+import { emitAuditEvent } from "./audit-service.js";
 import {
   type BodyRecord,
   type SupabaseDomainClientProvider,
@@ -30,6 +31,10 @@ export interface InvoiceService {
   createInvoiceResolution(auth: AuthContext, invoiceId: string, body: BodyRecord): Promise<unknown>;
   registerInvoiceHash(auth: AuthContext, invoiceId: string, body: BodyRecord): Promise<unknown>;
   evaluateInvoiceFinanceability(auth: AuthContext, invoiceId: string, body: BodyRecord): Promise<unknown>;
+}
+
+interface InvoiceServiceOptions {
+  auditEvents?: boolean;
 }
 
 function readRelationshipField(relationship: BodyRecord, key: string): string | undefined {
@@ -131,7 +136,7 @@ function canonicalizeInvoiceHash(body: BodyRecord) {
   return { canonicalPayload, hashDigest };
 }
 
-export function createInvoiceService(getClient: SupabaseDomainClientProvider): InvoiceService {
+export function createInvoiceService(getClient: SupabaseDomainClientProvider, options: InvoiceServiceOptions = {}): InvoiceService {
   return {
     async createInvoice(auth, body) {
       const relationshipId = requireString(body, "relationshipId");
@@ -177,7 +182,7 @@ export function createInvoiceService(getClient: SupabaseDomainClientProvider): I
         throw invalidRelationshipMode("Invoice buyerId and supplierId must match the relationship.");
       }
 
-      return unwrap(
+      const invoice = await unwrap<BodyRecord>(
         "Create invoice",
         insertRow(client, "invoices", {
           relationship_id: relationshipId,
@@ -196,6 +201,23 @@ export function createInvoiceService(getClient: SupabaseDomainClientProvider): I
           updated_by: auth.userId
         })
       );
+
+      if (options.auditEvents) {
+        await emitAuditEvent(client, auth, {
+          aggregateType: "INVOICE",
+          aggregateId: requireString(invoice, "id"),
+          eventType: "INVOICE_SUBMITTED",
+          payload: {
+            relationshipId,
+            supplierId,
+            buyerId,
+            invoiceNumber,
+            state: "SUBMITTED"
+          }
+        });
+      }
+
+      return invoice;
     },
 
     async createInvoiceResolution(auth, invoiceId, body) {
@@ -252,13 +274,29 @@ export function createInvoiceService(getClient: SupabaseDomainClientProvider): I
         })
       );
 
+      if (options.auditEvents) {
+        await emitAuditEvent(client, auth, {
+          aggregateType: "INVOICE",
+          aggregateId: invoiceId,
+          eventType: "INVOICE_RESOLVED",
+          reasonCode: requiredString(body, "reasonCode"),
+          payload: {
+            resolutionId: requiredString(resolution as BodyRecord, "id"),
+            decisionState,
+            acceptedAmount,
+            previousState: invoiceState,
+            state: decisionState
+          }
+        });
+      }
+
       return {
         resolution,
         invoice: updatedInvoice
       };
     },
 
-    async registerInvoiceHash(_auth, invoiceId, body) {
+    async registerInvoiceHash(auth, invoiceId, body) {
       const { canonicalPayload, hashDigest } = canonicalizeInvoiceHash(body);
       const client = getClient();
 
@@ -324,6 +362,18 @@ export function createInvoiceService(getClient: SupabaseDomainClientProvider): I
         })
       );
 
+      if (options.auditEvents) {
+        await emitAuditEvent(client, auth, {
+          aggregateType: "INVOICE",
+          aggregateId: invoiceId,
+          eventType: "INVOICE_HASH_REGISTERED",
+          payload: {
+            hashDigest,
+            duplicateDetected: false
+          }
+        });
+      }
+
       return {
         hashDigest,
         canonicalPayload,
@@ -332,7 +382,7 @@ export function createInvoiceService(getClient: SupabaseDomainClientProvider): I
       };
     },
 
-    async evaluateInvoiceFinanceability(_auth, invoiceId, body) {
+    async evaluateInvoiceFinanceability(auth, invoiceId, body) {
       const client = getClient();
       const invoiceResult = await client
         .from("invoices")
@@ -393,7 +443,7 @@ export function createInvoiceService(getClient: SupabaseDomainClientProvider): I
         throw badRequest("eligibleAmount must be greater than zero and cannot exceed accepted amount.");
       }
 
-      return unwrap(
+      const financeability = await unwrap<BodyRecord>(
         "Evaluate invoice financeability",
         insertRow(client, "financeability_records", {
           invoice_id: invoiceId,
@@ -411,6 +461,23 @@ export function createInvoiceService(getClient: SupabaseDomainClientProvider): I
           }
         })
       );
+
+      if (options.auditEvents) {
+        await emitAuditEvent(client, auth, {
+          aggregateType: "FINANCEABILITY",
+          aggregateId: requireString(financeability, "id"),
+          eventType: "FINANCEABILITY_EVALUATED",
+          reasonCode: requiredString(body, "reasonCode") ?? "FINANCEABLE_ACCEPTED_VALUE",
+          payload: {
+            invoiceId,
+            acceptedAmount,
+            eligibleAmount,
+            status: requiredString(body, "status") ?? "ELIGIBLE"
+          }
+        });
+      }
+
+      return financeability;
     }
   };
 }
