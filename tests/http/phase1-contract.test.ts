@@ -25,7 +25,7 @@ describe("Phase 1 HTTP API contract", () => {
       });
     });
 
-    it("reaches protected domain routes when a valid token is supplied", async () => {
+    it("validates protected domain routes when a valid token is supplied", async () => {
       const response = await request(app)
         .post("/api/v1/invoices")
         .set("Authorization", memberToken)
@@ -35,11 +35,11 @@ describe("Phase 1 HTTP API contract", () => {
           buyerId: "buyer-1",
           invoiceNumber: "INV-001"
         })
-        .expect(500);
+        .expect(400);
 
       expect(response.body).toMatchObject({
-        code: "supabase_not_configured",
-        reasonCode: "ERR_INTERNAL_SERVER_ERROR",
+        code: "bad_request",
+        reasonCode: "ERR_MISSING_REQUIRED_FIELDS",
         correlationId: expect.any(String)
       });
     });

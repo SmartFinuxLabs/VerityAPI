@@ -110,4 +110,47 @@ describe("relationship routes", () => {
       }
     });
   });
+
+  it("upserts relationship risk profile through the domain service", async () => {
+    const domainService = createDomainService({
+      upsertRelationshipRiskProfile: jest.fn(async () => ({
+        id: "risk-1",
+        relationshipId: "rel-1",
+        isComplete: true
+      }))
+    });
+    const payload = {
+      recourseType: "WITH_RECOURSE",
+      buyerObligationTerms: "NET_30_AFTER_ACCEPTANCE",
+      warrantyRepresentationFlags: ["NO_DUPLICATE_ASSIGNMENT"],
+      gracePeriodDays: 5,
+      defaultTriggerPolicy: "BUYER_NON_PAYMENT_AFTER_GRACE",
+      disputeEscalationPath: "OPERATIONS_REVIEW",
+      concentrationLimit: 500000,
+      creditCeiling: 1000000,
+      riskMode: "LOW"
+    };
+
+    const response = await request(createRelationshipTestApp(domainService))
+      .put("/api/v1/relationships/rel-1/risk-profile")
+      .send(payload)
+      .expect(200);
+
+    expect(domainService.upsertRelationshipRiskProfile).toHaveBeenCalledWith(
+      {
+        userId: "user-1",
+        participantRole: "BUYER",
+        organizationRole: "MEMBER"
+      },
+      "rel-1",
+      payload
+    );
+    expect(response.body).toEqual({
+      data: {
+        id: "risk-1",
+        relationshipId: "rel-1",
+        isComplete: true
+      }
+    });
+  });
 });

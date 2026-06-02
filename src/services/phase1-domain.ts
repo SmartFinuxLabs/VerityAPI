@@ -2,37 +2,25 @@ import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 import { env } from "../config/env.js";
 import { ApiError } from "../errors/api-error.js";
 import type { AuthContext } from "./auth-token.js";
+import {
+  type BodyRecord,
+  type SupabaseDomainClient,
+  insertRow,
+  numberOrUndefined,
+  requiredString,
+  unwrap,
+  updateRow
+} from "./domain-service-utils.js";
+import { createInvoiceService, type InvoiceService } from "./invoice-service.js";
+import { createRelationshipService, type RelationshipService } from "./relationship-service.js";
 
-type BodyRecord = Record<string, unknown>;
-
-interface SupabaseError {
-  message?: string;
-}
-
-type SupabaseResult<T = unknown> = {
-  data?: T | null;
-  error?: SupabaseError | null;
-};
-
-type SupabaseDomainClient = {
-  rpc(functionName: string, params?: BodyRecord): Promise<SupabaseResult>;
-  from(table: string): any;
-};
-
-export interface Phase1DomainService {
+export interface Phase1DomainService extends RelationshipService, InvoiceService {
   provisionOrganization(auth: AuthContext, body: BodyRecord): Promise<unknown>;
   listMemberships(auth: AuthContext, organizationId: string): Promise<unknown>;
   updateMembershipRole(auth: AuthContext, membershipId: string, body: BodyRecord): Promise<unknown>;
   createOrganizationInvitation(auth: AuthContext, body: BodyRecord): Promise<unknown>;
   acceptOrganizationInvitation(auth: AuthContext, invitationToken: string, body: BodyRecord): Promise<unknown>;
   revokeOrganizationInvitation(auth: AuthContext, invitationId: string): Promise<unknown>;
-  createRelationship(auth: AuthContext, body: BodyRecord): Promise<unknown>;
-  updateRelationshipInvoiceMode(auth: AuthContext, relationshipId: string, body: BodyRecord): Promise<unknown>;
-  upsertRelationshipRiskProfile(auth: AuthContext, relationshipId: string, body: BodyRecord): Promise<unknown>;
-  createInvoice(auth: AuthContext, body: BodyRecord): Promise<unknown>;
-  createInvoiceResolution(auth: AuthContext, invoiceId: string, body: BodyRecord): Promise<unknown>;
-  registerInvoiceHash(auth: AuthContext, invoiceId: string, body: BodyRecord): Promise<unknown>;
-  evaluateInvoiceFinanceability(auth: AuthContext, invoiceId: string, body: BodyRecord): Promise<unknown>;
   createFundingOffer(auth: AuthContext, body: BodyRecord): Promise<unknown>;
   createFundingCommitment(auth: AuthContext, offerId: string, body: BodyRecord): Promise<unknown>;
   createSettlementInstruction(auth: AuthContext, body: BodyRecord): Promise<unknown>;
@@ -55,85 +43,6 @@ function notConfigured(): ApiError {
   });
 }
 
-function operationFailed(operation: string, error?: SupabaseError | null): ApiError {
-  return new ApiError({
-    statusCode: 500,
-    code: "domain_operation_failed",
-    message: `${operation} failed.`,
-    reasonCode: "ERR_INTERNAL_SERVER_ERROR",
-    details: error?.message
-  });
-}
-
-function badRequest(message: string): ApiError {
-  return new ApiError({
-    statusCode: 400,
-    code: "bad_request",
-    message,
-    reasonCode: "ERR_MISSING_REQUIRED_FIELDS"
-  });
-}
-
-function invalidRelationshipMode(message: string): ApiError {
-  return new ApiError({
-    statusCode: 400,
-    code: "invalid_relationship_mode",
-    message,
-    reasonCode: "ERR_INVALID_RELATIONSHIP_MODE"
-  });
-}
-
-function requiredString(body: BodyRecord, key: string): string | undefined {
-  const value = body[key];
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
-}
-
-function requireString(body: BodyRecord, key: string): string {
-  const value = requiredString(body, key);
-  if (!value) {
-    throw badRequest(`${key} is required.`);
-  }
-
-  return value;
-}
-
-const invoiceModes = new Set(["SUPPLIER_ISSUED", "BUYER_IMPORTED", "SELF_BILLED"]);
-
-function requireInvoiceMode(body: BodyRecord): string {
-  const invoiceMode = requireString(body, "invoiceMode");
-
-  if (!invoiceModes.has(invoiceMode)) {
-    throw invalidRelationshipMode(`invoiceMode must be one of ${Array.from(invoiceModes).join(", ")}.`);
-  }
-
-  return invoiceMode;
-}
-
-function numberOrUndefined(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string") {
-    const parsed = Number.parseFloat(value);
-    return Number.isFinite(parsed) ? parsed : undefined;
-  }
-  return undefined;
-}
-
-function insertRow(client: SupabaseDomainClient, table: string, values: BodyRecord) {
-  return client.from(table).insert(values).select("*").maybeSingle();
-}
-
-function updateRow(client: SupabaseDomainClient, table: string, id: string, values: BodyRecord) {
-  return client.from(table).update(values).eq("id", id).select("*").maybeSingle();
-}
-
-async function unwrap<T>(operation: string, result: Promise<SupabaseResult<T>>) {
-  const { data, error } = await result;
-  if (error) {
-    throw operationFailed(operation, error);
-  }
-  return data ?? {};
-}
-
 export function createSupabasePhase1DomainService(options: Phase1DomainServiceOptions): Phase1DomainService {
   const createClient =
     options.createClient ??
@@ -147,7 +56,13 @@ export function createSupabasePhase1DomainService(options: Phase1DomainServiceOp
     return createClient(options.url, options.serviceRoleKey);
   }
 
+  const relationshipService = createRelationshipService(getClient);
+  const invoiceService = createInvoiceService(getClient);
+
   return {
+    ...relationshipService,
+    ...invoiceService,
+
     provisionOrganization(auth, body) {
       return unwrap(
         "Provision organization",
@@ -221,139 +136,6 @@ export function createSupabasePhase1DomainService(options: Phase1DomainServiceOp
           revoked_by_user_id: auth.userId,
           revoked_at: new Date().toISOString(),
           updated_at: new Date().toISOString()
-        })
-      );
-    },
-
-    async createRelationship(auth, body) {
-      const buyerId = requireString(body, "buyerId");
-      const supplierId = requireString(body, "supplierId");
-      const invoiceMode = requireInvoiceMode(body);
-
-      if (buyerId === supplierId) {
-        throw invalidRelationshipMode("buyerId and supplierId must reference different organizations.");
-      }
-
-      return unwrap(
-        "Create relationship",
-        insertRow(getClient(), "relationships", {
-          buyer_id: buyerId,
-          supplier_id: supplierId,
-          invoice_mode: invoiceMode,
-          payment_mode: requiredString(body, "paymentMode") ?? "USDC",
-          source_system_reference: requiredString(body, "sourceSystemReference"),
-          created_by: auth.userId,
-          updated_by: auth.userId
-        })
-      );
-    },
-
-    async updateRelationshipInvoiceMode(auth, relationshipId, body) {
-      const invoiceMode = requireInvoiceMode(body);
-
-      return unwrap(
-        "Update relationship invoice mode",
-        updateRow(getClient(), "relationships", relationshipId, {
-          invoice_mode: invoiceMode,
-          updated_by: auth.userId,
-          updated_at: new Date().toISOString()
-        })
-      );
-    },
-
-    upsertRelationshipRiskProfile(_auth, relationshipId, body) {
-      return unwrap(
-        "Update relationship risk profile",
-        insertRow(getClient(), "risk_profiles", {
-          relationship_id: relationshipId,
-          recourse_type: requiredString(body, "recourseType") ?? "WITH_RECOURSE",
-          warranty_flags: body.warrantyFlags ?? [],
-          delinquency_terms: body.delinquencyTerms ?? {},
-          concentration_limit: numberOrUndefined(body.concentrationLimit),
-          credit_ceiling: numberOrUndefined(body.creditCeiling),
-          risk_mode: requiredString(body, "riskMode"),
-          is_complete: Boolean(body.isComplete)
-        })
-      );
-    },
-
-    createInvoice(auth, body) {
-      return unwrap(
-        "Create invoice",
-        insertRow(getClient(), "invoices", {
-          relationship_id: requiredString(body, "relationshipId"),
-          supplier_id: requiredString(body, "supplierId"),
-          buyer_id: requiredString(body, "buyerId"),
-          invoice_number: requiredString(body, "invoiceNumber"),
-          issue_date: requiredString(body, "issueDate"),
-          due_date: requiredString(body, "dueDate"),
-          currency: requiredString(body, "currency") ?? "USDC",
-          gross_amount: numberOrUndefined(body.grossAmount),
-          accepted_amount: numberOrUndefined(body.acceptedAmount),
-          source_system_reference: requiredString(body, "sourceSystemReference"),
-          metadata: body.metadata ?? {},
-          created_by: auth.userId,
-          updated_by: auth.userId
-        })
-      );
-    },
-
-    createInvoiceResolution(auth, invoiceId, body) {
-      return unwrap(
-        "Create invoice resolution",
-        insertRow(getClient(), "invoice_resolutions", {
-          invoice_id: invoiceId,
-          decision_state: requiredString(body, "decisionState"),
-          accepted_amount: numberOrUndefined(body.acceptedAmount),
-          reviewer_id: auth.userId,
-          decision_reason: requiredString(body, "decisionReason"),
-          reason_code: requiredString(body, "reasonCode")
-        })
-      );
-    },
-
-    async registerInvoiceHash(_auth, invoiceId, body) {
-      const hashData = await unwrap(
-        "Compute invoice hash",
-        getClient().rpc("compute_invoice_hash", {
-          p_supplier_entity_id: requiredString(body, "supplierEntityId"),
-          p_buyer_entity_id: requiredString(body, "buyerEntityId"),
-          p_invoice_number: requiredString(body, "invoiceNumber"),
-          p_invoice_issue_date: requiredString(body, "invoiceIssueDate"),
-          p_invoice_currency: requiredString(body, "invoiceCurrency") ?? "USDC",
-          p_gross_invoice_amount: numberOrUndefined(body.grossInvoiceAmount),
-          p_accepted_amount_at_registration: numberOrUndefined(body.acceptedAmountAtRegistration),
-          p_due_date: requiredString(body, "dueDate"),
-          p_relationship_id: requiredString(body, "relationshipId"),
-          p_source_system_reference: requiredString(body, "sourceSystemReference")
-        })
-      );
-      const firstHash = Array.isArray(hashData) ? hashData[0] : hashData;
-      const hashRecord = firstHash && typeof firstHash === "object" ? (firstHash as BodyRecord) : {};
-
-      return unwrap(
-        "Register invoice hash",
-        updateRow(getClient(), "invoices", invoiceId, {
-          canonical_payload: hashRecord.canonical_payload,
-          hash_digest: hashRecord.hash_digest,
-          hash_registered_at: new Date().toISOString()
-        })
-      );
-    },
-
-    evaluateInvoiceFinanceability(_auth, invoiceId, body) {
-      return unwrap(
-        "Evaluate invoice financeability",
-        insertRow(getClient(), "financeability_records", {
-          invoice_id: invoiceId,
-          resolution_id: requiredString(body, "resolutionId"),
-          accepted_amount: numberOrUndefined(body.acceptedAmount),
-          eligible_amount: numberOrUndefined(body.eligibleAmount),
-          risk_mode: requiredString(body, "riskMode"),
-          status: requiredString(body, "status") ?? "ELIGIBLE",
-          reason_code: requiredString(body, "reasonCode"),
-          is_duplicate_blocked: Boolean(body.isDuplicateBlocked),
-          policy_snapshot: body.policySnapshot ?? {}
         })
       );
     },

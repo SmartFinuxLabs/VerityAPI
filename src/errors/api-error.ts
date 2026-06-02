@@ -1,4 +1,4 @@
-import type { ReasonCode } from "../contracts/phase1.js";
+import type { ReasonCode } from "../contracts/verity-domain.js";
 
 export class ApiError extends Error {
   readonly statusCode: number;
