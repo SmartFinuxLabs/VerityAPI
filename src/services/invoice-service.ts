@@ -24,6 +24,7 @@ import {
   requireString,
   unwrap,
   updateRow,
+  upsertRow,
   validateDueDateAfterIssue
 } from "./domain-service-utils.js";
 import {
@@ -73,7 +74,7 @@ function defaultRiskProfile(relationshipId: string) {
 }
 
 const decisionStates = new Set(["ACCEPTED", "PARTIALLY_ACCEPTED", "REJECTED", "DISPUTED", "HELD"]);
-const resolvableInvoiceStates = ["SUBMITTED", "UNDER_REVIEW"] as const;
+const resolvableInvoiceStates = ["SUBMITTED", "UNDER_REVIEW", "DISPUTED", "HELD"] as const;
 const resolvableInvoiceStateSet = new Set<string>(resolvableInvoiceStates);
 const financeableInvoiceStates = new Set(["ACCEPTED", "PARTIALLY_ACCEPTED"]);
 
@@ -316,15 +317,15 @@ export function createInvoiceService(getClient: SupabaseDomainClientProvider, op
       validateResolutionAmount(decisionState, acceptedAmount, grossAmount);
 
       const resolution = await unwrap(
-        "Create invoice resolution",
-        insertRow(client, "invoice_resolutions", {
+        "Upsert invoice resolution",
+        upsertRow(client, "invoice_resolutions", {
           invoice_id: invoiceId,
           decision_state: decisionState,
           accepted_amount: acceptedAmount,
           reviewer_id: auth.userId,
           decision_reason: requiredString(body, "decisionReason"),
           reason_code: requiredString(body, "reasonCode")
-        })
+        }, "invoice_id")
       );
 
       const updatedInvoice = await unwrap(

@@ -244,6 +244,10 @@ export function insertRow(client: SupabaseDomainClient, table: string, values: B
   return client.from(table).insert(values).select("*").maybeSingle();
 }
 
+export function upsertRow(client: SupabaseDomainClient, table: string, values: BodyRecord, onConflict: string) {
+  return client.from(table).upsert(values, { onConflict }).select("*").maybeSingle();
+}
+
 export function updateRow(client: SupabaseDomainClient, table: string, id: string, values: BodyRecord) {
   return client.from(table).update(values).eq("id", id).select("*").maybeSingle();
 }

@@ -94,7 +94,7 @@ describe("domain audit events", () => {
       from: jest.fn((table: string) => {
         if (table === "audit_events") return { insert: auditInsert };
         if (table === "relationships") return relationshipRead;
-        if (table === "invoice_resolutions") return { insert: resolutionInsert };
+        if (table === "invoice_resolutions") return { insert: resolutionInsert, upsert: resolutionInsert };
         return invoiceRead;
       })
     };

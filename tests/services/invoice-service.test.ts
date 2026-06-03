@@ -106,6 +106,7 @@ function createResolutionClient({
   const resolutionMaybeSingle = jest.fn(async () => ({ data: resolutionData, error: null }));
   const resolutionSelect = jest.fn(() => ({ maybeSingle: resolutionMaybeSingle }));
   const resolutionInsert = jest.fn(() => ({ select: resolutionSelect }));
+  const resolutionUpsert = jest.fn(() => ({ select: resolutionSelect }));
 
   const from = jest.fn((table: string) => {
     if (table === "invoices") {
@@ -114,7 +115,7 @@ function createResolutionClient({
         update: invoiceUpdate
       };
     }
-    return { insert: resolutionInsert };
+    return { insert: resolutionInsert, upsert: resolutionUpsert };
   });
   const client = { rpc: jest.fn(), from };
 
@@ -122,7 +123,8 @@ function createResolutionClient({
     client,
     invoiceReadEq,
     invoiceUpdate,
-    resolutionInsert
+    resolutionInsert,
+    resolutionUpsert
   };
 }
 
@@ -545,7 +547,7 @@ describe("invoice service", () => {
     };
 
     it("accepts invoices when acceptedAmount equals grossAmount and updates invoice state", async () => {
-      const { client, invoiceReadEq, invoiceUpdate, resolutionInsert } = createResolutionClient();
+      const { client, invoiceReadEq, invoiceUpdate, resolutionUpsert } = createResolutionClient();
       const service = createService(client);
 
       await expect(service.createInvoiceResolution(auth, "invoice-1", validResolutionPayload)).resolves.toEqual({
@@ -562,14 +564,67 @@ describe("invoice service", () => {
       });
 
       expect(invoiceReadEq).toHaveBeenCalledWith("id", "invoice-1");
-      expect(resolutionInsert).toHaveBeenCalledWith({
+      expect(resolutionUpsert).toHaveBeenCalledWith({
         invoice_id: "invoice-1",
         decision_state: "ACCEPTED",
         accepted_amount: 25000,
         reviewer_id: "user-1",
         decision_reason: "Buyer accepted invoice",
         reason_code: "BUYER_APPROVED"
+      }, { onConflict: "invoice_id" });
+      expect(invoiceUpdate).toHaveBeenCalledWith({
+        state: "ACCEPTED",
+        accepted_amount: 25000,
+        updated_by: "user-1",
+        updated_at: expect.any(String)
       });
+    });
+
+    it("accepts disputed invoices when a buyer accepts a supplier rebuttal", async () => {
+      const { client, invoiceUpdate, resolutionUpsert } = createResolutionClient({
+        invoiceData: {
+          id: "invoice-1",
+          state: "DISPUTED",
+          gross_amount: 25000
+        },
+        updatedInvoiceData: {
+          id: "invoice-1",
+          state: "ACCEPTED",
+          accepted_amount: 25000
+        }
+      });
+      const service = createService(client);
+
+      await expect(
+        service.createInvoiceResolution(auth, "invoice-1", {
+          decisionState: "ACCEPTED",
+          acceptedAmount: 25000,
+          decisionReason: "Buyer accepted supplier rebuttal and approved invoice",
+          reasonCode: "REBUTTAL_ACCEPTED",
+          nextInvoiceState: "SUBMITTED"
+        })
+      ).resolves.toEqual({
+        resolution: {
+          id: "resolution-1",
+          invoice_id: "invoice-1",
+          decision_state: "ACCEPTED",
+          accepted_amount: 25000
+        },
+        invoice: {
+          id: "invoice-1",
+          state: "ACCEPTED",
+          accepted_amount: 25000
+        }
+      });
+
+      expect(resolutionUpsert).toHaveBeenCalledWith({
+        invoice_id: "invoice-1",
+        decision_state: "ACCEPTED",
+        accepted_amount: 25000,
+        reviewer_id: "user-1",
+        decision_reason: "Buyer accepted supplier rebuttal and approved invoice",
+        reason_code: "REBUTTAL_ACCEPTED"
+      }, { onConflict: "invoice_id" });
       expect(invoiceUpdate).toHaveBeenCalledWith({
         state: "ACCEPTED",
         accepted_amount: 25000,
@@ -579,7 +634,7 @@ describe("invoice service", () => {
     });
 
     it("partially accepts invoices only when acceptedAmount is greater than zero and below grossAmount", async () => {
-      const { client, invoiceUpdate, resolutionInsert } = createResolutionClient({
+      const { client, invoiceUpdate, resolutionUpsert } = createResolutionClient({
         resolutionData: {
           id: "resolution-1",
           invoice_id: "invoice-1",
@@ -612,10 +667,10 @@ describe("invoice service", () => {
         }
       });
 
-      expect(resolutionInsert).toHaveBeenCalledWith(expect.objectContaining({
+      expect(resolutionUpsert).toHaveBeenCalledWith(expect.objectContaining({
         decision_state: "PARTIALLY_ACCEPTED",
         accepted_amount: 12000
-      }));
+      }), { onConflict: "invoice_id" });
       expect(invoiceUpdate).toHaveBeenCalledWith(expect.objectContaining({
         state: "PARTIALLY_ACCEPTED",
         accepted_amount: 12000
@@ -623,7 +678,7 @@ describe("invoice service", () => {
     });
 
     it("rejects accepted decisions when acceptedAmount does not equal grossAmount", async () => {
-      const { client, resolutionInsert, invoiceUpdate } = createResolutionClient();
+      const { client, resolutionUpsert, invoiceUpdate } = createResolutionClient();
       const service = createService(client);
 
       await expect(
@@ -636,12 +691,12 @@ describe("invoice service", () => {
         code: "bad_request",
         reasonCode: "ERR_MISSING_REQUIRED_FIELDS"
       });
-      expect(resolutionInsert).not.toHaveBeenCalled();
+      expect(resolutionUpsert).not.toHaveBeenCalled();
       expect(invoiceUpdate).not.toHaveBeenCalled();
     });
 
     it("rejects partial decisions when acceptedAmount is not below grossAmount", async () => {
-      const { client, resolutionInsert, invoiceUpdate } = createResolutionClient();
+      const { client, resolutionUpsert, invoiceUpdate } = createResolutionClient();
       const service = createService(client);
 
       await expect(
@@ -655,12 +710,12 @@ describe("invoice service", () => {
         code: "bad_request",
         reasonCode: "ERR_MISSING_REQUIRED_FIELDS"
       });
-      expect(resolutionInsert).not.toHaveBeenCalled();
+      expect(resolutionUpsert).not.toHaveBeenCalled();
       expect(invoiceUpdate).not.toHaveBeenCalled();
     });
 
     it("rejects decisions with acceptedAmount above grossAmount", async () => {
-      const { client, resolutionInsert, invoiceUpdate } = createResolutionClient();
+      const { client, resolutionUpsert, invoiceUpdate } = createResolutionClient();
       const service = createService(client);
 
       await expect(
@@ -673,12 +728,12 @@ describe("invoice service", () => {
         code: "bad_request",
         reasonCode: "ERR_MISSING_REQUIRED_FIELDS"
       });
-      expect(resolutionInsert).not.toHaveBeenCalled();
+      expect(resolutionUpsert).not.toHaveBeenCalled();
       expect(invoiceUpdate).not.toHaveBeenCalled();
     });
 
     it("marks rejected invoices non-financeable with zero accepted amount", async () => {
-      const { client, invoiceUpdate, resolutionInsert } = createResolutionClient({
+      const { client, invoiceUpdate, resolutionUpsert } = createResolutionClient({
         resolutionData: {
           id: "resolution-1",
           invoice_id: "invoice-1",
@@ -711,10 +766,10 @@ describe("invoice service", () => {
         }
       });
 
-      expect(resolutionInsert).toHaveBeenCalledWith(expect.objectContaining({
+      expect(resolutionUpsert).toHaveBeenCalledWith(expect.objectContaining({
         decision_state: "REJECTED",
         accepted_amount: 0
-      }));
+      }), { onConflict: "invoice_id" });
       expect(invoiceUpdate).toHaveBeenCalledWith(expect.objectContaining({
         state: "REJECTED",
         accepted_amount: 0
@@ -722,7 +777,7 @@ describe("invoice service", () => {
     });
 
     it("rejects buyer resolution when invoice is already finalized", async () => {
-      const { client, resolutionInsert, invoiceUpdate } = createResolutionClient({
+      const { client, resolutionUpsert, invoiceUpdate } = createResolutionClient({
         invoiceData: {
           id: "invoice-1",
           state: "FACTORED",
@@ -740,17 +795,17 @@ describe("invoice service", () => {
         details: {
           currentState: "FACTORED",
           requestedState: "ACCEPTED",
-          allowedSourceStates: ["SUBMITTED", "UNDER_REVIEW"]
+          allowedSourceStates: ["SUBMITTED", "UNDER_REVIEW", "DISPUTED", "HELD"]
         }
       });
-      expect(resolutionInsert).not.toHaveBeenCalled();
+      expect(resolutionUpsert).not.toHaveBeenCalled();
       expect(invoiceUpdate).not.toHaveBeenCalled();
     });
 
-    it.each(["ACCEPTED", "PARTIALLY_ACCEPTED", "REJECTED", "DISPUTED", "HELD", "CANCELLED", "FACTORED", "SETTLED"])(
+    it.each(["ACCEPTED", "PARTIALLY_ACCEPTED", "REJECTED", "CANCELLED", "FACTORED", "SETTLED"])(
       "rejects resolution transitions from %s with stable reason-code details",
       async (state) => {
-        const { client, resolutionInsert, invoiceUpdate } = createResolutionClient({
+        const { client, resolutionUpsert, invoiceUpdate } = createResolutionClient({
           invoiceData: {
             id: "invoice-1",
             state,
@@ -768,10 +823,10 @@ describe("invoice service", () => {
           details: {
             currentState: state,
             requestedState: "ACCEPTED",
-            allowedSourceStates: ["SUBMITTED", "UNDER_REVIEW"]
+            allowedSourceStates: ["SUBMITTED", "UNDER_REVIEW", "DISPUTED", "HELD"]
           }
         });
-        expect(resolutionInsert).not.toHaveBeenCalled();
+        expect(resolutionUpsert).not.toHaveBeenCalled();
         expect(invoiceUpdate).not.toHaveBeenCalled();
       }
     );
