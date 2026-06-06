@@ -90,9 +90,13 @@ describe("Supabase workspace state service", () => {
     expect(state.invoices).toEqual([
       expect.objectContaining({
         id: "invoice-1",
+        invoiceNumber: "INV-001",
         buyer: "Northstar Buyer LLC",
         supplierName: "Acme Supplier Co",
         status: "PENDING",
+        issueDate: "2026-06-02",
+        dueDate: "2026-07-02",
+        maturityDate: "2026-07-02",
         poNumber: "PO-INV-001",
         goodsReceiptNumber: "GR-INV-001",
         walletAddress: "supplier-org-1",
@@ -268,5 +272,116 @@ describe("Supabase workspace state service", () => {
       message: "Read registered buyers failed."
     });
     expect(organizationsOrder).toHaveBeenCalledWith("legal_name", { ascending: true });
+  });
+
+  it("aggregates supplier analytics for status volume, cash flow, trends, and credit history", async () => {
+    const partyMembershipsOrder = jest.fn(() => queryResult([{ organization_id: "supplier-org-1" }]));
+    const invoicesOrder = jest.fn(() =>
+      queryResult([
+        {
+          id: "invoice-accepted",
+          invoice_number: "INV-100",
+          supplier_id: "supplier-org-1",
+          buyer_id: "buyer-org-1",
+          gross_amount: "42000.00",
+          accepted_amount: "42000.00",
+          state: "ACCEPTED",
+          issue_date: "2026-05-02",
+          due_date: "2026-07-15",
+          metadata: {},
+        },
+        {
+          id: "invoice-factored",
+          invoice_number: "INV-101",
+          supplier_id: "supplier-org-1",
+          buyer_id: "buyer-org-1",
+          gross_amount: "9000.00",
+          accepted_amount: "9000.00",
+          state: "FACTORED",
+          issue_date: "2026-05-08",
+          due_date: "2026-07-15",
+          metadata: {},
+        },
+        {
+          id: "invoice-settled",
+          invoice_number: "INV-102",
+          supplier_id: "supplier-org-1",
+          buyer_id: "buyer-org-1",
+          gross_amount: "18000.00",
+          accepted_amount: "18000.00",
+          state: "SETTLED",
+          issue_date: "2026-04-14",
+          due_date: "2026-05-14",
+          metadata: {},
+        },
+      ])
+    );
+
+    const client = {
+      from: jest.fn((table: string) => {
+        if (table === "party_memberships") {
+          return {
+            select: jest.fn(() => ({
+              eq: jest.fn(() => ({
+                eq: jest.fn(() => ({
+                  order: partyMembershipsOrder
+                }))
+              }))
+            }))
+          };
+        }
+
+        if (table === "invoices") {
+          return {
+            select: jest.fn(() => ({
+              in: jest.fn(() => ({
+                order: invoicesOrder
+              }))
+            }))
+          };
+        }
+
+        throw new Error(`Unexpected table ${table}`);
+      })
+    } as unknown as SupabaseWorkspaceClient;
+
+    const service = createSupabaseWorkspaceService({
+      url: "https://supabase.test",
+      serviceRoleKey: "service-role-key",
+      createClient: jest.fn(() => client)
+    });
+
+    const analytics = await service.getSupplierAnalytics({
+      userId: "supplier-user-1",
+      accessToken: "supplier-token",
+      participantRole: "SUPPLIER",
+      organizationRole: "SUPER_USER"
+    });
+
+    expect(analytics.volumeByStatus).toEqual(
+      expect.arrayContaining([
+        { status: "ACCEPTED", count: 1, totalAmount: 42000 },
+        { status: "FACTORED", count: 1, totalAmount: 9000 },
+        { status: "SETTLED", count: 1, totalAmount: 18000 },
+      ])
+    );
+    expect(analytics.timeTrends).toEqual([
+      { period: "2026-04", createdVolume: 18000, settledVolume: 18000 },
+      { period: "2026-05", createdVolume: 51000, settledVolume: 0 },
+    ]);
+    expect(analytics.cashFlowProjections).toEqual([
+      { date: "2026-07-15", expectedAmount: 42000, factoredAmount: 9000 },
+    ]);
+    expect(analytics.financialHealth).toMatchObject({
+      totalOutstanding: 51000,
+      totalFactored: 9000,
+      liquidityRatio: 0.18,
+      disputeRatio: 0,
+      onChainCreditScore: 610,
+    });
+    expect(analytics.creditHistory).toEqual([
+      { period: "2026-04", score: 610 },
+      { period: "2026-05", score: 610 },
+    ]);
   });
 });

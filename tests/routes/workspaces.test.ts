@@ -34,6 +34,7 @@ describe("workspace routes", () => {
         }
       })),
       getSupplierWorkspaceState: jest.fn(),
+      getSupplierAnalytics: jest.fn(),
       getInvestorWorkspaceState: jest.fn()
     };
 
@@ -58,5 +59,41 @@ describe("workspace routes", () => {
         }
       }
     });
+  });
+
+  it("returns supplier analytics from the configured service", async () => {
+    const workspaceService: WorkspaceService = {
+      getBuyerWorkspaceState: jest.fn(),
+      getSupplierWorkspaceState: jest.fn(),
+      getSupplierAnalytics: jest.fn(async () => ({
+        volumeByStatus: [{ status: "ACCEPTED", count: 2, totalAmount: 42000 }],
+        timeTrends: [{ period: "2026-05", createdVolume: 42000, settledVolume: 0 }],
+        cashFlowProjections: [{ date: "2026-07-15", expectedAmount: 42000, factoredAmount: 9000 }],
+        financialHealth: {
+          disputeRatio: 0,
+          onChainCreditScore: 835,
+          totalOutstanding: 42000,
+          totalFactored: 9000,
+          liquidityRatio: 0.21
+        },
+        creditHistory: [{ period: "2026-05", score: 835 }]
+      })),
+      getInvestorWorkspaceState: jest.fn()
+    };
+
+    const response = await request(createWorkspaceTestApp(workspaceService))
+      .get("/api/v1/workspaces/supplier/analytics")
+      .expect(200);
+
+    expect(workspaceService.getSupplierAnalytics).toHaveBeenCalledWith({
+      userId: "user-1",
+      participantRole: "BUYER",
+      organizationRole: "MEMBER"
+    });
+    expect(response.body.data.financialHealth).toMatchObject({
+      totalOutstanding: 42000,
+      liquidityRatio: 0.21
+    });
+    expect(response.body.data.creditHistory).toEqual([{ period: "2026-05", score: 835 }]);
   });
 });

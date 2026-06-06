@@ -32,7 +32,11 @@ export interface SupplierAnalyticsState {
   financialHealth: {
     disputeRatio: number;
     onChainCreditScore: number;
+    totalOutstanding: number;
+    totalFactored: number;
+    liquidityRatio: number;
   };
+  creditHistory: { period: string; score: number }[];
 }
 
 export interface InvestorWorkspaceState {
@@ -120,6 +124,11 @@ function numberValue(value: unknown, fallback = 0): number {
     return Number.isFinite(parsed) ? parsed : fallback;
   }
   return fallback;
+}
+
+function roundTo(value: number, decimals: number): number {
+  const multiplier = 10 ** decimals;
+  return Math.round(value * multiplier) / multiplier;
 }
 
 function stringValue(value: unknown, fallback = ""): string {
@@ -375,13 +384,17 @@ export function createSupabaseWorkspaceService(options: SupabaseWorkspaceService
 
     async getSupplierAnalytics(auth) {
       const organizationIds = await getOrganizationIds(auth);
-      const invoices = await getInvoicesByPartyIds("supplier_id", auth, organizationIds) as any[];
+      const invoices = await getInvoicesByPartyIds("supplier_id", auth, organizationIds);
 
       const volumeMap = new Map<string, { count: number; totalAmount: number }>();
       const timeMap = new Map<string, { created: number; settled: number }>();
       const cashFlowMap = new Map<string, { expected: number; factored: number }>();
+      const creditMonthMap = new Map<string, { settled: number; disputed: number }>();
 
       let disputedCount = 0;
+      let settledCount = 0;
+      let totalOutstanding = 0;
+      let totalFactored = 0;
 
       for (const inv of invoices) {
         // Volume by Status
@@ -391,6 +404,9 @@ export function createSupabaseWorkspaceService(options: SupabaseWorkspaceService
         volumeMap.set(inv.status, stat);
 
         if (inv.status === "DISPUTED") disputedCount++;
+        if (inv.status === "SETTLED") settledCount++;
+        if (inv.status !== "SETTLED") totalOutstanding += inv.amount;
+        if (inv.status === "FACTORED") totalFactored += inv.amount;
 
         // Time trends (by YYYY-MM)
         if (inv.issueDate) {
@@ -401,6 +417,11 @@ export function createSupabaseWorkspaceService(options: SupabaseWorkspaceService
             tStat.settled += inv.amount;
           }
           timeMap.set(month, tStat);
+
+          const creditStat = creditMonthMap.get(month) || { settled: 0, disputed: 0 };
+          if (inv.status === "SETTLED") creditStat.settled += 1;
+          if (inv.status === "DISPUTED") creditStat.disputed += 1;
+          creditMonthMap.set(month, creditStat);
         }
 
         // Cash flow projections (by maturity date)
@@ -429,8 +450,18 @@ export function createSupabaseWorkspaceService(options: SupabaseWorkspaceService
         .sort((a, b) => a.date.localeCompare(b.date));
 
       const disputeRatio = invoices.length > 0 ? disputedCount / invoices.length : 0;
-      // Mocking onChainCreditScore calculation for now, this normally comes from a smart contract or historical ledger.
-      const onChainCreditScore = invoices.length > 0 ? Math.min(850, 600 + (invoices.filter(i => i.status === "SETTLED").length * 10)) : 0;
+      const onChainCreditScore = invoices.length > 0
+        ? Math.max(300, Math.min(850, 600 + settledCount * 10 - disputedCount * 25))
+        : 0;
+      const liquidityRatio = totalOutstanding > 0 ? roundTo(totalFactored / totalOutstanding, 2) : 0;
+      const creditHistory = Array.from(creditMonthMap.entries())
+        .sort(([left], [right]) => left.localeCompare(right))
+        .reduce<{ period: string; score: number }[]>((history, [period, data]) => {
+          const previousScore = history.at(-1)?.score ?? 600;
+          const score = Math.max(300, Math.min(850, previousScore + data.settled * 10 - data.disputed * 25));
+          history.push({ period, score });
+          return history;
+        }, []);
 
       return {
         volumeByStatus,
@@ -438,8 +469,12 @@ export function createSupabaseWorkspaceService(options: SupabaseWorkspaceService
         cashFlowProjections,
         financialHealth: {
           disputeRatio,
-          onChainCreditScore
-        }
+          onChainCreditScore,
+          totalOutstanding,
+          totalFactored,
+          liquidityRatio
+        },
+        creditHistory
       };
     },
 
