@@ -198,6 +198,558 @@ describe("Supabase workspace state service", () => {
     expect(organizationsOrder).toHaveBeenCalledWith("legal_name", { ascending: true });
   });
 
+  it("maps buyer workspace invoices with supplier legal names and invoice numbers", async () => {
+    const partyMembershipsOrder = jest.fn(() => queryResult([{ organization_id: "buyer-org-1" }]));
+    const invoicesOrder = jest.fn(() =>
+      queryResult([
+        {
+          id: "uuid-buyer-invoice-1",
+          invoice_number: "INV-BUYER-API-001",
+          relationship_id: "rel-1",
+          supplier_id: "supplier-org-1",
+          buyer_id: "buyer-org-1",
+          gross_amount: "24000.00",
+          accepted_amount: null,
+          currency: "USDC",
+          state: "SUBMITTED",
+          issue_date: "2026-06-02",
+          due_date: "2026-07-02",
+          metadata: {},
+          buyer: { legal_name: "Acme Buyer LLC" },
+          supplier: { legal_name: "Northstar Supplier LLC" }
+        }
+      ])
+    );
+    const supplierNamesOrder = jest.fn(() =>
+      queryResult([
+        {
+          id: "supplier-org-1",
+          legal_name: "Northstar Supplier LLC"
+        }
+      ])
+    );
+
+    const client = {
+      from: jest.fn((table: string) => {
+        if (table === "party_memberships") {
+          return {
+            select: jest.fn(() => ({
+              eq: jest.fn(() => ({
+                eq: jest.fn(() => ({
+                  order: partyMembershipsOrder
+                }))
+              }))
+            }))
+          };
+        }
+
+        if (table === "invoices") {
+          return {
+            select: jest.fn(() => ({
+              in: jest.fn(() => ({
+                order: invoicesOrder
+              }))
+            }))
+          };
+        }
+
+        if (table === "organizations") {
+          return {
+            select: jest.fn(() => ({
+              in: jest.fn((_column: string, ids: unknown[]) => {
+                expect(ids).toEqual(["supplier-org-1"]);
+                return {
+                  order: supplierNamesOrder
+                };
+              })
+            }))
+          };
+        }
+
+        throw new Error(`Unexpected table ${table}`);
+      })
+    } as unknown as SupabaseWorkspaceClient;
+
+    const service = createSupabaseWorkspaceService({
+      url: "https://supabase.test",
+      serviceRoleKey: "service-role-key",
+      createClient: jest.fn(() => client)
+    });
+
+    const state = await service.getBuyerWorkspaceState({
+      userId: "buyer-user-1",
+      participantRole: "BUYER",
+      organizationRole: "SUPER_USER"
+    });
+
+    expect(state.invoices).toEqual([
+      expect.objectContaining({
+        id: "uuid-buyer-invoice-1",
+        invoiceNumber: "INV-BUYER-API-001",
+        supplierName: "Northstar Supplier LLC",
+        supplierId: "supplier-org-1",
+        status: "PENDING_VERIFICATION",
+        issueDate: "2026-06-02",
+        dueDate: "2026-07-02",
+        maturityDate: "2026-07-02",
+      })
+    ]);
+  });
+
+  it("prefers joined supplier legal names over id-like metadata supplier names for buyer workspace invoices", async () => {
+    const partyMembershipsOrder = jest.fn(() => queryResult([{ organization_id: "buyer-org-1" }]));
+    const invoicesOrder = jest.fn(() =>
+      queryResult([
+        {
+          id: "uuid-buyer-invoice-id-like-supplier",
+          invoice_number: "INV-BUYER-API-003",
+          relationship_id: "rel-3",
+          supplier_id: "supplier-org-3",
+          buyer_id: "buyer-org-1",
+          gross_amount: "24000.00",
+          accepted_amount: null,
+          currency: "USDC",
+          state: "SUBMITTED",
+          issue_date: "2026-06-02",
+          due_date: "2026-07-02",
+          metadata: {
+            supplierName: "supplier-org-3"
+          },
+          buyer: { legal_name: "Acme Buyer LLC" },
+          supplier: { legal_name: "Resolved Supplier Legal LLC" }
+        }
+      ])
+    );
+    const supplierNamesOrder = jest.fn(() =>
+      queryResult([
+        {
+          id: "supplier-org-3",
+          legal_name: "Resolved Supplier Legal LLC"
+        }
+      ])
+    );
+
+    const client = {
+      from: jest.fn((table: string) => {
+        if (table === "party_memberships") {
+          return {
+            select: jest.fn(() => ({
+              eq: jest.fn(() => ({
+                eq: jest.fn(() => ({
+                  order: partyMembershipsOrder
+                }))
+              }))
+            }))
+          };
+        }
+
+        if (table === "invoices") {
+          return {
+            select: jest.fn(() => ({
+              in: jest.fn(() => ({
+                order: invoicesOrder
+              }))
+            }))
+          };
+        }
+
+        if (table === "organizations") {
+          return {
+            select: jest.fn(() => ({
+              in: jest.fn((_column: string, ids: unknown[]) => {
+                expect(ids).toEqual(["supplier-org-3"]);
+                return {
+                  order: supplierNamesOrder
+                };
+              })
+            }))
+          };
+        }
+
+        throw new Error(`Unexpected table ${table}`);
+      })
+    } as unknown as SupabaseWorkspaceClient;
+
+    const service = createSupabaseWorkspaceService({
+      url: "https://supabase.test",
+      serviceRoleKey: "service-role-key",
+      createClient: jest.fn(() => client)
+    });
+
+    const state = await service.getBuyerWorkspaceState({
+      userId: "buyer-user-1",
+      participantRole: "BUYER",
+      organizationRole: "SUPER_USER"
+    });
+
+    expect(state.invoices).toEqual([
+      expect.objectContaining({
+        id: "uuid-buyer-invoice-id-like-supplier",
+        invoiceNumber: "INV-BUYER-API-003",
+        supplierId: "supplier-org-3",
+        supplierName: "Resolved Supplier Legal LLC"
+      })
+    ]);
+  });
+
+  it("prefers joined supplier legal names over placeholder metadata supplier names for buyer workspace invoices", async () => {
+    const partyMembershipsOrder = jest.fn(() => queryResult([{ organization_id: "buyer-org-1" }]));
+    const invoicesOrder = jest.fn(() =>
+      queryResult([
+        {
+          id: "uuid-buyer-invoice-placeholder-supplier",
+          invoice_number: "INV-BUYER-API-004",
+          relationship_id: "rel-4",
+          supplier_id: "supplier-org-4",
+          buyer_id: "buyer-org-1",
+          gross_amount: "24000.00",
+          accepted_amount: null,
+          currency: "USDC",
+          state: "SUBMITTED",
+          issue_date: "2026-06-02",
+          due_date: "2026-07-02",
+          metadata: {
+            supplierName: "Supplier name unavailable"
+          },
+          buyer: { legal_name: "Acme Buyer LLC" },
+          supplier: { legal_name: "Placeholder Resolved Supplier LLC" }
+        }
+      ])
+    );
+    const supplierNamesOrder = jest.fn(() =>
+      queryResult([
+        {
+          id: "supplier-org-4",
+          legal_name: "Placeholder Resolved Supplier LLC"
+        }
+      ])
+    );
+
+    const client = {
+      from: jest.fn((table: string) => {
+        if (table === "party_memberships") {
+          return {
+            select: jest.fn(() => ({
+              eq: jest.fn(() => ({
+                eq: jest.fn(() => ({
+                  order: partyMembershipsOrder
+                }))
+              }))
+            }))
+          };
+        }
+
+        if (table === "invoices") {
+          return {
+            select: jest.fn(() => ({
+              in: jest.fn(() => ({
+                order: invoicesOrder
+              }))
+            }))
+          };
+        }
+
+        if (table === "organizations") {
+          return {
+            select: jest.fn(() => ({
+              in: jest.fn((_column: string, ids: unknown[]) => {
+                expect(ids).toEqual(["supplier-org-4"]);
+                return {
+                  order: supplierNamesOrder
+                };
+              })
+            }))
+          };
+        }
+
+        throw new Error(`Unexpected table ${table}`);
+      })
+    } as unknown as SupabaseWorkspaceClient;
+
+    const service = createSupabaseWorkspaceService({
+      url: "https://supabase.test",
+      serviceRoleKey: "service-role-key",
+      createClient: jest.fn(() => client)
+    });
+
+    const state = await service.getBuyerWorkspaceState({
+      userId: "buyer-user-1",
+      participantRole: "BUYER",
+      organizationRole: "SUPER_USER"
+    });
+
+    expect(state.invoices).toEqual([
+      expect.objectContaining({
+        id: "uuid-buyer-invoice-placeholder-supplier",
+        invoiceNumber: "INV-BUYER-API-004",
+        supplierId: "supplier-org-4",
+        supplierName: "Placeholder Resolved Supplier LLC"
+      })
+    ]);
+  });
+
+  it("retrieves buyer invoice supplier names from supplier ids when invoice rows omit joined supplier details", async () => {
+    const partyMembershipsOrder = jest.fn(() => queryResult([{ organization_id: "buyer-org-1" }]));
+    const invoicesOrder = jest.fn(() =>
+      queryResult([
+        {
+          id: "uuid-buyer-invoice-2",
+          invoice_number: "INV-BUYER-API-002",
+          relationship_id: "rel-2",
+          supplier_id: "supplier-org-2",
+          buyer_id: "buyer-org-1",
+          gross_amount: "31000.00",
+          accepted_amount: null,
+          currency: "USDC",
+          state: "SUBMITTED",
+          issue_date: "2026-06-04",
+          due_date: "2026-07-04",
+          metadata: {},
+          buyer: { legal_name: "Acme Buyer LLC" }
+        }
+      ])
+    );
+    const supplierNamesOrder = jest.fn(() =>
+      queryResult([
+        {
+          id: "supplier-org-2",
+          legal_name: "Resolved Supplier Name LLC"
+        }
+      ])
+    );
+
+    const client = {
+      from: jest.fn((table: string) => {
+        if (table === "party_memberships") {
+          return {
+            select: jest.fn(() => ({
+              eq: jest.fn(() => ({
+                eq: jest.fn(() => ({
+                  order: partyMembershipsOrder
+                }))
+              }))
+            }))
+          };
+        }
+
+        if (table === "invoices") {
+          return {
+            select: jest.fn(() => ({
+              in: jest.fn(() => ({
+                order: invoicesOrder
+              }))
+            }))
+          };
+        }
+
+        if (table === "organizations") {
+          return {
+            select: jest.fn(() => ({
+              in: jest.fn((_column: string, ids: unknown[]) => {
+                expect(ids).toEqual(["supplier-org-2"]);
+                return {
+                  order: supplierNamesOrder
+                };
+              })
+            }))
+          };
+        }
+
+        throw new Error(`Unexpected table ${table}`);
+      })
+    } as unknown as SupabaseWorkspaceClient;
+
+    const service = createSupabaseWorkspaceService({
+      url: "https://supabase.test",
+      serviceRoleKey: "service-role-key",
+      createClient: jest.fn(() => client)
+    });
+
+    const state = await service.getBuyerWorkspaceState({
+      userId: "buyer-user-1",
+      participantRole: "BUYER",
+      organizationRole: "SUPER_USER"
+    });
+
+    expect(state.invoices).toEqual([
+      expect.objectContaining({
+        id: "uuid-buyer-invoice-2",
+        invoiceNumber: "INV-BUYER-API-002",
+        supplierId: "supplier-org-2",
+        supplierName: "Resolved Supplier Name LLC"
+      })
+    ]);
+    expect(supplierNamesOrder).toHaveBeenCalledWith("legal_name", { ascending: true });
+  });
+
+  it("retrieves buyer invoice supplier names from supplier ids when rows contain placeholder supplier names", async () => {
+    const partyMembershipsOrder = jest.fn(() => queryResult([{ organization_id: "buyer-org-1" }]));
+    const invoicesOrder = jest.fn(() =>
+      queryResult([
+        {
+          id: "uuid-buyer-invoice-placeholder-fallback",
+          invoice_number: "INV-BUYER-API-005",
+          relationship_id: "rel-5",
+          supplier_id: "supplier-org-5",
+          buyer_id: "buyer-org-1",
+          gross_amount: "31000.00",
+          accepted_amount: null,
+          currency: "USDC",
+          state: "SUBMITTED",
+          issue_date: "2026-06-04",
+          due_date: "2026-07-04",
+          metadata: {
+            supplierName: "Supplier name unavailable"
+          },
+          buyer: { legal_name: "Acme Buyer LLC" }
+        }
+      ])
+    );
+    const supplierNamesOrder = jest.fn(() =>
+      queryResult([
+        {
+          id: "supplier-org-5",
+          legal_name: "Fallback Supplier Name LLC"
+        }
+      ])
+    );
+
+    const client = {
+      from: jest.fn((table: string) => {
+        if (table === "party_memberships") {
+          return {
+            select: jest.fn(() => ({
+              eq: jest.fn(() => ({
+                eq: jest.fn(() => ({
+                  order: partyMembershipsOrder
+                }))
+              }))
+            }))
+          };
+        }
+
+        if (table === "invoices") {
+          return {
+            select: jest.fn(() => ({
+              in: jest.fn(() => ({
+                order: invoicesOrder
+              }))
+            }))
+          };
+        }
+
+        if (table === "organizations") {
+          return {
+            select: jest.fn(() => ({
+              in: jest.fn((_column: string, ids: unknown[]) => {
+                expect(ids).toEqual(["supplier-org-5"]);
+                return {
+                  order: supplierNamesOrder
+                };
+              })
+            }))
+          };
+        }
+
+        throw new Error(`Unexpected table ${table}`);
+      })
+    } as unknown as SupabaseWorkspaceClient;
+
+    const service = createSupabaseWorkspaceService({
+      url: "https://supabase.test",
+      serviceRoleKey: "service-role-key",
+      createClient: jest.fn(() => client)
+    });
+
+    const state = await service.getBuyerWorkspaceState({
+      userId: "buyer-user-1",
+      participantRole: "BUYER",
+      organizationRole: "SUPER_USER"
+    });
+
+    expect(state.invoices).toEqual([
+      expect.objectContaining({
+        id: "uuid-buyer-invoice-placeholder-fallback",
+        supplierId: "supplier-org-5",
+        supplierName: "Fallback Supplier Name LLC"
+      })
+    ]);
+    expect(supplierNamesOrder).toHaveBeenCalledWith("legal_name", { ascending: true });
+  });
+
+  it("uses invoice metadata supplier name as the authoritative buyer invoice supplier name", async () => {
+    const partyMembershipsOrder = jest.fn(() => queryResult([{ organization_id: "buyer-org-1" }]));
+    const invoicesOrder = jest.fn(() =>
+      queryResult([
+        {
+          id: "uuid-buyer-invoice-authoritative-supplier",
+          invoice_number: "INV-BUYER-API-006",
+          relationship_id: "rel-6",
+          supplier_id: "supplier-org-6",
+          buyer_id: "buyer-org-1",
+          gross_amount: "31000.00",
+          accepted_amount: null,
+          currency: "USDC",
+          state: "SUBMITTED",
+          issue_date: "2026-06-04",
+          due_date: "2026-07-04",
+          metadata: {
+            supplierName: "Client Supplied Supplier Name"
+          },
+          buyer: { legal_name: "Acme Buyer LLC" },
+          supplier: { legal_name: "Joined Supplier Alias LLC" }
+        }
+      ])
+    );
+    const client = {
+      from: jest.fn((table: string) => {
+        if (table === "party_memberships") {
+          return {
+            select: jest.fn(() => ({
+              eq: jest.fn(() => ({
+                eq: jest.fn(() => ({
+                  order: partyMembershipsOrder
+                }))
+              }))
+            }))
+          };
+        }
+
+        if (table === "invoices") {
+          return {
+            select: jest.fn(() => ({
+              in: jest.fn(() => ({
+                order: invoicesOrder
+              }))
+            }))
+          };
+        }
+
+        throw new Error(`Unexpected table ${table}`);
+      })
+    } as unknown as SupabaseWorkspaceClient;
+
+    const service = createSupabaseWorkspaceService({
+      url: "https://supabase.test",
+      serviceRoleKey: "service-role-key",
+      createClient: jest.fn(() => client)
+    });
+
+    const state = await service.getBuyerWorkspaceState({
+      userId: "buyer-user-1",
+      participantRole: "BUYER",
+      organizationRole: "SUPER_USER"
+    });
+
+    expect(state.invoices).toEqual([
+      expect.objectContaining({
+        id: "uuid-buyer-invoice-authoritative-supplier",
+        supplierId: "supplier-org-6",
+        supplierName: "Client Supplied Supplier Name"
+      })
+    ]);
+  });
+
   it("fails supplier workspace state when registered buyer directory lookup fails", async () => {
     const partyMembershipsOrder = jest.fn(() => queryResult([{ organization_id: "supplier-org-1" }]));
     const invoicesOrder = jest.fn(() =>

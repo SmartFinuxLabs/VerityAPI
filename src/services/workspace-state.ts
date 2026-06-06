@@ -156,6 +156,24 @@ function nestedLegalName(row: Record<string, unknown>, key: string): string {
   return stringValue(objectValue(value).legal_name);
 }
 
+function displayString(excludedValue: string, ...values: unknown[]): string {
+  const excluded = excludedValue.trim();
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+
+    const candidate = value.trim();
+    if (
+      candidate.length > 0 &&
+      candidate !== excluded &&
+      candidate.toLowerCase() !== "supplier name unavailable"
+    ) {
+      return candidate;
+    }
+  }
+
+  return "";
+}
+
 function frontendInvoiceStatus(state: string, perspective: "BUYER" | "SUPPLIER"): string {
   if (perspective === "SUPPLIER") {
     if (state === "SUBMITTED" || state === "UNDER_REVIEW") return "PENDING";
@@ -174,7 +192,11 @@ function frontendInvoiceStatus(state: string, perspective: "BUYER" | "SUPPLIER")
   }
 }
 
-function mapInvoiceRow(row: Record<string, unknown>, perspective: "BUYER" | "SUPPLIER") {
+function mapInvoiceRow(
+  row: Record<string, unknown>,
+  perspective: "BUYER" | "SUPPLIER",
+  options: { supplierNameById?: Map<string, string> } = {}
+) {
   const metadata = objectValue(row.metadata);
   const invoiceNumber = stringValue(row.invoice_number, stringValue(row.id, "invoice"));
   const supplierId = stringValue(row.supplier_id);
@@ -192,7 +214,17 @@ function mapInvoiceRow(row: Record<string, unknown>, perspective: "BUYER" | "SUP
     supplierId,
     buyerId,
     buyer: stringValue(metadata.buyerName, nestedLegalName(row, "buyer")),
-    supplierName: stringValue(metadata.supplierName, nestedLegalName(row, "supplier")),
+    supplierName: displayString(
+      supplierId,
+      metadata.supplierLegalName,
+      metadata.supplier_legal_name,
+      metadata.supplierDisplayName,
+      metadata.supplier_display_name,
+      metadata.supplierName,
+      metadata.supplier_name,
+      nestedLegalName(row, "supplier"),
+      options.supplierNameById?.get(supplierId)
+    ),
     amount,
     grossAmount,
     acceptedAmount,
@@ -312,7 +344,8 @@ export function createSupabaseWorkspaceService(options: SupabaseWorkspaceService
   async function getInvoicesByPartyIds(
     column: "buyer_id" | "supplier_id",
     auth: AuthContext,
-    organizationIds: string[]
+    organizationIds: string[],
+    options: { supplierNameById?: Map<string, string> } = {}
   ) {
     if (organizationIds.length === 0) {
       return [];
@@ -329,7 +362,7 @@ export function createSupabaseWorkspaceService(options: SupabaseWorkspaceService
     }
 
     const perspective = column === "buyer_id" ? "BUYER" : "SUPPLIER";
-    return (data ?? []).map((row) => mapInvoiceRow(row, perspective));
+    return (data ?? []).map((row) => mapInvoiceRow(row, perspective, options));
   }
 
   async function getInvoicesByParty(column: "buyer_id" | "supplier_id", auth: AuthContext) {
@@ -351,9 +384,60 @@ export function createSupabaseWorkspaceService(options: SupabaseWorkspaceService
     return (data ?? []).map(mapRegisteredBuyerRow).filter((buyer) => buyer.buyerId.length > 0);
   }
 
+  async function getOrganizationNameMap(auth: AuthContext, organizationIds: string[]): Promise<Map<string, string>> {
+    const ids = Array.from(new Set(organizationIds.filter((organizationId) => organizationId.length > 0)));
+    if (ids.length === 0) {
+      return new Map();
+    }
+
+    const { data, error } = await getClient(auth)
+      .from("organizations")
+      .select("id,legal_name")
+      .in("id", ids)
+      .order("legal_name", { ascending: true });
+
+    if (error) {
+      throw queryFailed("Read supplier organization names", error);
+    }
+
+    return new Map(
+      (data ?? [])
+        .map((row) => [stringValue(row.id), stringValue(row.legal_name)] as const)
+        .filter(([id, legalName]) => id.length > 0 && legalName.length > 0)
+    );
+  }
+
   return {
     async getBuyerWorkspaceState(auth) {
-      const invoices = await getInvoicesByParty("buyer_id", auth);
+      const organizationIds = await getOrganizationIds(auth);
+      const supplierIds = new Set<string>();
+      const invoicesWithoutSupplierFallback = await getInvoicesByPartyIds("buyer_id", auth, organizationIds);
+      for (const invoice of invoicesWithoutSupplierFallback) {
+        const row = invoice as { supplierId?: unknown; supplierName?: unknown };
+        if (
+          typeof row.supplierId === "string" &&
+          row.supplierId.length > 0 &&
+          (typeof row.supplierName !== "string" || row.supplierName.trim().length === 0)
+        ) {
+          supplierIds.add(row.supplierId);
+        }
+      }
+      const supplierNameById = await getOrganizationNameMap(auth, Array.from(supplierIds));
+      const invoices = supplierNameById.size > 0
+        ? invoicesWithoutSupplierFallback.map((invoice) => {
+            const row = invoice as { supplierId?: unknown; supplierName?: unknown };
+            if (typeof row.supplierName === "string" && row.supplierName.trim().length > 0) {
+              return invoice;
+            }
+            if (typeof row.supplierId === "string") {
+              return {
+                ...invoice as Record<string, unknown>,
+                supplierName: supplierNameById.get(row.supplierId) ?? row.supplierName
+              };
+            }
+            return invoice;
+          })
+        : invoicesWithoutSupplierFallback;
       return {
         invoices,
         fundingRequests: [],
