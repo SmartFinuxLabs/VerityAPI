@@ -40,6 +40,7 @@ export interface SupplierAnalyticsState {
 }
 
 export interface InvestorWorkspaceState {
+  investorOrganizationId: string | null;
   invoices: unknown[];
   settlements: unknown[];
   ledgerRows: unknown[];
@@ -178,6 +179,7 @@ function frontendInvoiceStatus(state: string, perspective: "BUYER" | "SUPPLIER")
   if (perspective === "SUPPLIER") {
     if (state === "SUBMITTED" || state === "UNDER_REVIEW") return "PENDING";
     if (state === "ACCEPTED" || state === "PARTIALLY_ACCEPTED") return "ACCEPTED";
+    if (state === "FACTORING_REQUESTED") return "FACTORING_REQUESTED";
     if (state === "DISPUTED" || state === "HELD" || state === "REJECTED") return "DISPUTED";
     if (state === "SETTLED") return "SETTLED";
     if (state === "FACTORED") return "FACTORED";
@@ -185,6 +187,7 @@ function frontendInvoiceStatus(state: string, perspective: "BUYER" | "SUPPLIER")
   } else {
     if (state === "SUBMITTED" || state === "UNDER_REVIEW") return "PENDING_VERIFICATION";
     if (state === "ACCEPTED" || state === "PARTIALLY_ACCEPTED") return "VERIFIED";
+    if (state === "FACTORING_REQUESTED") return "FACTORING_REQUESTED";
     if (state === "DISPUTED" || state === "HELD" || state === "REJECTED") return "CONTESTED";
     if (state === "SETTLED") return "SETTLED";
     if (state === "FACTORED") return "FACTORED";
@@ -287,6 +290,152 @@ function mapSettlementRow(row: Record<string, unknown>) {
     provider: stringValue(row.provider, "ARC"),
     date: dateValue(row.requested_at)
   };
+}
+
+function fundingStatusFromOfferStatus(status: string): string {
+  if (status === "OPEN" || status === "PARTIALLY_FILLED") return "LISTED";
+  if (status === "FILLED") return "FUNDED";
+  if (status === "CANCELLED") return "CANCELLED";
+  if (status === "EXPIRED") return "EXPIRED";
+  return "NOT_LISTED";
+}
+
+function daysUntil(dueDate: string): number {
+  if (!dueDate) return 0;
+  const parsed = Date.parse(`${dueDate.slice(0, 10)}T00:00:00.000Z`);
+  if (Number.isNaN(parsed)) return 0;
+  const today = new Date();
+  const todayUtc = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate());
+  return Math.max(0, Math.ceil((parsed - todayUtc) / (24 * 60 * 60 * 1000)));
+}
+
+function mapMarketplaceOfferRow(row: Record<string, unknown>) {
+  const financeability = objectValue(row.financeability);
+  const invoice = objectValue(financeability.invoice);
+  const metadata = objectValue(invoice.metadata);
+  const invoiceNumber = stringValue(invoice.invoice_number, stringValue(invoice.id, stringValue(row.id, "invoice")));
+  const invoiceAmount = numberValue(invoice.accepted_amount, numberValue(invoice.gross_amount));
+  const offeredAmount = numberValue(row.offered_amount, numberValue(financeability.eligible_amount, invoiceAmount));
+  const yieldApr = numberValue(row.yield_apr);
+  const dueDate = dateValue(invoice.due_date);
+
+  return {
+    id: invoiceNumber,
+    invoiceId: stringValue(invoice.id),
+    invoiceNumber,
+    fundingOfferId: stringValue(row.id),
+    financeabilityId: stringValue(financeability.id, stringValue(row.financeability_id)),
+    supplier: displayString(
+      stringValue(invoice.supplier_id),
+      metadata.supplierLegalName,
+      metadata.supplier_legal_name,
+      metadata.supplierName,
+      metadata.supplier_name,
+      nestedLegalName(invoice, "supplier"),
+      stringValue(invoice.supplier_id, "Supplier")
+    ),
+    obligor: displayString(
+      stringValue(invoice.buyer_id),
+      metadata.buyerLegalName,
+      metadata.buyer_legal_name,
+      metadata.buyerName,
+      metadata.buyer_name,
+      nestedLegalName(invoice, "buyer"),
+      stringValue(invoice.buyer_id, "Buyer")
+    ),
+    logoType: "assembly",
+    faceValue: invoiceAmount,
+    offeredAmount,
+    discount: roundTo(yieldApr * 100, 2),
+    maturity: daysUntil(dueDate),
+    status: stringValue(row.status) === "OPEN" ? "Available" : "Pending",
+    fundingStatus: fundingStatusFromOfferStatus(stringValue(row.status)),
+    buyerRating: stringValue(metadata.buyerRating, "A"),
+    buyerScore: numberValue(metadata.buyerScore, 90),
+    poNumber: stringValue(metadata.poNumber, `PO-${invoiceNumber}`),
+    poDate: dateValue(invoice.issue_date),
+    grnWarehouse: stringValue(metadata.goodsReceiptNumber, stringValue(metadata.goods_receipt_number, `GR-${invoiceNumber}`)),
+    grnDate: dueDate,
+    signatureName: stringValue(metadata.signatureName, "Verity Verified"),
+    signatureDivision: stringValue(metadata.signatureDivision, "Accounts Payable"),
+    signatureDate: dateValue(invoice.issue_date),
+    description: stringValue(metadata.itemDescription, `Invoice ${invoiceNumber}`),
+    verityScore: numberValue(metadata.verityScore, 92),
+    paymentDelinquency: numberValue(metadata.paymentDelinquency, 0),
+    avgDaysBeyondTerm: numberValue(metadata.avgDaysBeyondTerm, 0),
+    disputeRatio: numberValue(metadata.disputeRatio, 0),
+    retentionReleaseRate: numberValue(metadata.retentionReleaseRate, 100),
+    marketCap: stringValue(metadata.marketCap, "N/A"),
+    spRating: stringValue(metadata.spRating, "A"),
+    nyseSymbol: stringValue(metadata.nyseSymbol, "N/A"),
+    invoiceStatus: frontendInvoiceStatus(stringValue(invoice.state, "ACCEPTED"), "SUPPLIER"),
+    offerStatus: stringValue(row.status, "OPEN"),
+    expiresAt: dateValue(row.expires_at),
+    reserveRate: numberValue(row.reserve_rate)
+  };
+}
+
+function mapSupplierFundingOfferRow(row: Record<string, unknown>) {
+  const financeability = objectValue(row.financeability);
+  const fundingStatus = fundingStatusFromOfferStatus(stringValue(row.status));
+  const offeredAmount = numberValue(row.offered_amount, numberValue(financeability.eligible_amount));
+
+  return {
+    invoiceId: stringValue(financeability.invoice_id),
+    financeabilityId: stringValue(financeability.id, stringValue(row.financeability_id)),
+    fundingOfferId: stringValue(row.id),
+    fundingStatus,
+    offeredAmount,
+    advanceAmount: offeredAmount,
+    yieldApr: numberValue(row.yield_apr),
+    reserveRate: numberValue(row.reserve_rate),
+    marketplaceSubmittedAt: dateValue(row.created_at)
+  };
+}
+
+async function attachSupplierFundingMetadata(
+  client: SupabaseWorkspaceClient,
+  invoices: Record<string, unknown>[]
+): Promise<Record<string, unknown>[]> {
+  const invoiceIds = invoices
+    .map((invoice) => stringValue(invoice.id))
+    .filter((invoiceId) => invoiceId.length > 0);
+
+  if (invoiceIds.length === 0) {
+    return invoices;
+  }
+
+  const offersResult = await client
+    .from("funding_offers")
+    .select("id,financeability_id,offered_amount,yield_apr,reserve_rate,status,created_at,financeability:financeability_records!inner(id,invoice_id,eligible_amount,status)")
+    .in("financeability.invoice_id", invoiceIds)
+    .order("created_at", { ascending: false });
+
+  if (offersResult.error) {
+    throw queryFailed("Read supplier funding offers", offersResult.error);
+  }
+
+  const fundingByInvoiceId = new Map<string, ReturnType<typeof mapSupplierFundingOfferRow>>();
+  for (const row of offersResult.data ?? []) {
+    const funding = mapSupplierFundingOfferRow(row);
+    if (!funding.invoiceId || fundingByInvoiceId.has(funding.invoiceId)) {
+      continue;
+    }
+    fundingByInvoiceId.set(funding.invoiceId, funding);
+  }
+
+  return invoices.map((invoice) => {
+    const funding = fundingByInvoiceId.get(stringValue(invoice.id));
+    if (!funding) {
+      return invoice;
+    }
+
+    const { invoiceId: _invoiceId, ...fundingFields } = funding;
+    return {
+      ...invoice,
+      ...fundingFields
+    };
+  });
 }
 
 function mapRegisteredBuyerRow(row: Record<string, unknown>): RegisteredBuyerOption {
@@ -454,9 +603,10 @@ export function createSupabaseWorkspaceService(options: SupabaseWorkspaceService
       const organizationIds = await getOrganizationIds(auth);
       const invoices = await getInvoicesByPartyIds("supplier_id", auth, organizationIds);
       const registeredBuyers = await getRegisteredBuyers(auth);
+      const invoicesWithFunding = await attachSupplierFundingMetadata(getClient(auth), invoices);
       return {
         supplierOrganizationId: organizationIds[0] ?? null,
-        invoices,
+        invoices: invoicesWithFunding,
         registeredBuyers,
         availableLiquidity: 0,
         escrowValue: 0,
@@ -567,6 +717,7 @@ export function createSupabaseWorkspaceService(options: SupabaseWorkspaceService
 
       if (organizationIds.length === 0) {
         return {
+          investorOrganizationId: null,
           invoices: [],
           settlements: [],
           ledgerRows: [],
@@ -600,6 +751,17 @@ export function createSupabaseWorkspaceService(options: SupabaseWorkspaceService
 
       const committedRows = commitmentsResult.data ?? [];
       const ledgerRows = (ledgerResult.data ?? []).map(mapLedgerRow);
+      const marketplaceResult = await getClient(auth)
+        .from("funding_offers")
+        .select("*,financeability:financeability_records!inner(id,invoice_id,eligible_amount,status,invoice:invoices!inner(id,invoice_number,supplier_id,buyer_id,gross_amount,accepted_amount,currency,state,issue_date,due_date,metadata,supplier:organizations!invoices_supplier_id_fkey(legal_name),buyer:organizations!invoices_buyer_id_fkey(legal_name)))")
+        .eq("status", "OPEN")
+        .order("created_at", { ascending: false });
+
+      if (marketplaceResult.error) {
+        throw queryFailed("Read investor marketplace offers", marketplaceResult.error);
+      }
+
+      const marketplaceInvoices = (marketplaceResult.data ?? []).map((row) => mapMarketplaceOfferRow(row));
       const totalCommitted = committedRows.reduce(
         (total, row) => total + numberValue(row.committed_amount),
         0
@@ -609,7 +771,8 @@ export function createSupabaseWorkspaceService(options: SupabaseWorkspaceService
         .reduce((total, row) => total + numberValue(row.amount), 0);
 
       return {
-        invoices: committedRows,
+        investorOrganizationId: organizationIds[0] ?? null,
+        invoices: [...marketplaceInvoices, ...committedRows],
         settlements: (ledgerResult.data ?? []).map(mapSettlementRow),
         ledgerRows,
         totalCommitted,

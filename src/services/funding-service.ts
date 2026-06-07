@@ -4,6 +4,7 @@ import {
   type BodyRecord,
   type SupabaseDomainClientProvider,
   badRequest,
+  conflict,
   duplicateCommitment,
   forbidden,
   insertRow,
@@ -15,11 +16,18 @@ import {
   requireAssetCode,
   requirePositiveNumber,
   requireString,
+  updateRow,
+  upsertRow,
   unwrap
 } from "./domain-service-utils.js";
-import { validateFundingCommitmentCommand, validateFundingOfferCommand } from "./domain-validation-layer.js";
+import {
+  validateFundingCommitmentCommand,
+  validateFundingOfferCommand,
+  validateMarketplaceSubmissionCommand
+} from "./domain-validation-layer.js";
 
 export interface FundingService {
+  submitInvoiceToMarketplace(auth: AuthContext, invoiceId: string, body: BodyRecord): Promise<unknown>;
   createFundingOffer(auth: AuthContext, body: BodyRecord): Promise<unknown>;
   createFundingCommitment(auth: AuthContext, offerId: string, body: BodyRecord): Promise<unknown>;
 }
@@ -49,8 +57,182 @@ function optionalNonNegativeRate(body: BodyRecord, key: string, fallback = 0): n
   return value;
 }
 
+function readRequiredPositiveRowAmount(record: BodyRecord, keys: string[], message: string): number {
+  for (const key of keys) {
+    const value = numberOrUndefined(record[key]);
+    if (value !== undefined && value > 0) {
+      return value;
+    }
+  }
+
+  throw operationFailed("Read invoice lifecycle state", { message });
+}
+
 export function createFundingService(getClient: SupabaseDomainClientProvider, options: FundingServiceOptions = {}): FundingService {
   return {
+    async submitInvoiceToMarketplace(auth, invoiceId, body) {
+      validateMarketplaceSubmissionCommand(body);
+      const offeredAmount = requirePositiveNumber(body, "offeredAmount");
+      const yieldApr = optionalNonNegativeRate(body, "yieldApr");
+      const reserveRate = optionalNonNegativeRate(body, "reserveRate");
+      const settlementCurrency = requireAssetCode(body, "settlementCurrency");
+      const expiresAt = requireString(body, "expiresAt");
+      const client = getClient(auth);
+
+      const invoiceResult = await client
+        .from("invoices")
+        .select("id,supplier_id,buyer_id,state,gross_amount,accepted_amount,currency")
+        .eq("id", invoiceId)
+        .maybeSingle();
+
+      if (invoiceResult.error) {
+        throw operationFailed("Read invoice", invoiceResult.error);
+      }
+
+      if (!invoiceResult.data || typeof invoiceResult.data !== "object") {
+        throw notFound("Invoice was not found.");
+      }
+
+      const invoice = invoiceResult.data as BodyRecord;
+      if (readStringField(invoice, "state") !== "ACCEPTED") {
+        throw notFinanceableState("Only ACCEPTED invoices can be submitted to marketplace.");
+      }
+
+      const supplierId = requireString({ supplierId: invoice.supplier_id }, "supplierId");
+      const membershipResult = await client
+        .from("party_memberships")
+        .select("organization_id")
+        .eq("organization_id", supplierId)
+        .eq("user_id", auth.userId)
+        .eq("membership_status", "ACTIVE")
+        .maybeSingle();
+
+      if (membershipResult.error) {
+        throw operationFailed("Read supplier membership", membershipResult.error);
+      }
+
+      if (!membershipResult.data || typeof membershipResult.data !== "object") {
+        throw forbidden("Supplier invoice marketplace submission requires membership in the supplier organization.");
+      }
+
+      const existingOfferResult = await client
+        .from("funding_offers")
+        .select("id,financeability:financeability_records!inner(invoice_id)")
+        .eq("financeability.invoice_id", invoiceId)
+        .eq("status", "OPEN")
+        .maybeSingle();
+
+      if (existingOfferResult.error) {
+        throw operationFailed("Check marketplace offer", existingOfferResult.error);
+      }
+
+      if (existingOfferResult.data && typeof existingOfferResult.data === "object") {
+        throw conflict("Invoice already has an open marketplace offer.");
+      }
+
+      const invoiceAmount = readRequiredPositiveRowAmount(
+        invoice,
+        ["accepted_amount", "gross_amount"],
+        "Invoice accepted_amount or gross_amount is invalid."
+      );
+      if (offeredAmount > invoiceAmount) {
+        throw badRequest("offeredAmount cannot exceed accepted invoice amount.");
+      }
+
+      const resolutionResult = await client
+        .from("invoice_resolutions")
+        .select("id,decision_state")
+        .eq("invoice_id", invoiceId)
+        .maybeSingle();
+
+      if (resolutionResult.error) {
+        throw operationFailed("Read invoice resolution", resolutionResult.error);
+      }
+
+      if (!resolutionResult.data || typeof resolutionResult.data !== "object") {
+        throw notFinanceableState("Marketplace submission requires an accepted invoice resolution.");
+      }
+
+      const resolution = resolutionResult.data as BodyRecord;
+      const decisionState = readStringField(resolution, "decision_state");
+      if (decisionState !== "ACCEPTED" && decisionState !== "PARTIALLY_ACCEPTED") {
+        throw notFinanceableState("Marketplace submission requires an accepted invoice resolution.");
+      }
+
+      const advanceRate = invoiceAmount > 0 ? offeredAmount / invoiceAmount : 0;
+      const financeabilityRecord = await unwrap<BodyRecord>(
+        "Upsert financeability record",
+        upsertRow(client, "financeability_records", {
+          invoice_id: invoiceId,
+          resolution_id: requireString(resolution, "id"),
+          accepted_amount: invoiceAmount,
+          eligible_amount: offeredAmount,
+          status: "ELIGIBLE",
+          reason_code: "SUPPLIER_MARKETPLACE_SUBMISSION",
+          policy_snapshot: {
+            submittedBy: auth.userId,
+            requestedOfferedAmount: offeredAmount,
+            invoiceAmount,
+            advanceRate,
+            yieldApr,
+            reserveRate,
+            settlementCurrency,
+            expiresAt
+          }
+        }, "invoice_id")
+      );
+
+      const financeabilityId = requireString(financeabilityRecord, "id");
+      const offerRecord = await unwrap<BodyRecord>(
+        "Create funding offer",
+        insertRow(client, "funding_offers", {
+          financeability_id: financeabilityId,
+          offered_amount: offeredAmount,
+          yield_apr: yieldApr,
+          reserve_rate: reserveRate,
+          settlement_currency: settlementCurrency,
+          status: "OPEN",
+          expires_at: expiresAt,
+          created_by: auth.userId
+        })
+      );
+
+      const fundingOfferId = requireString(offerRecord, "id");
+      await unwrap<BodyRecord>(
+        "Update invoice factoring state",
+        updateRow(client, "invoices", invoiceId, {
+          state: "FACTORING_REQUESTED",
+          updated_by: auth.userId
+        })
+      );
+
+      if (options.auditEvents) {
+        await emitDomainAuditEvent(client, auth, {
+          aggregateType: "FUNDING_OFFER",
+          aggregateId: fundingOfferId,
+          eventType: "INVOICE_MARKETPLACE_SUBMITTED",
+          payload: {
+            invoiceId,
+            financeabilityId,
+            fundingOfferId,
+            offeredAmount,
+            settlementCurrency
+          }
+        });
+      }
+
+      return {
+        invoiceId,
+        financeabilityId,
+        fundingOfferId,
+        fundingStatus: "LISTED",
+        offeredAmount,
+        yieldApr,
+        reserveRate,
+        expiresAt
+      };
+    },
+
     async createFundingOffer(auth, body) {
       validateFundingOfferCommand(body);
       const financeabilityId = requireString(body, "financeabilityId");

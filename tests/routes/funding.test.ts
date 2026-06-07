@@ -36,6 +36,7 @@ function createDomainService(overrides: Partial<Phase1DomainService>): Phase1Dom
     createInvoiceResolution: jest.fn(),
     registerInvoiceHash: jest.fn(),
     evaluateInvoiceFinanceability: jest.fn(),
+    submitInvoiceToMarketplace: jest.fn(),
     createFundingOffer: jest.fn(),
     createFundingCommitment: jest.fn(),
     createSettlementInstruction: jest.fn(),
@@ -123,6 +124,55 @@ describe("funding routes", () => {
         id: "commitment-1",
         fundingOfferId: "offer-1",
         status: "PLEDGED"
+      }
+    });
+  });
+
+  it("submits supplier invoices to marketplace through the domain service", async () => {
+    const domainService = createDomainService({
+      submitInvoiceToMarketplace: jest.fn(async () => ({
+        invoiceId: "invoice-1",
+        financeabilityId: "financeability-1",
+        fundingOfferId: "offer-1",
+        fundingStatus: "LISTED",
+        offeredAmount: 45000,
+        yieldApr: 0.12,
+        reserveRate: 0.1,
+        expiresAt: "2026-09-01T00:00:00.000Z"
+      }))
+    });
+    const payload = {
+      offeredAmount: 45000,
+      yieldApr: 0.12,
+      reserveRate: 0.1,
+      settlementCurrency: "USDC",
+      expiresAt: "2026-09-01T00:00:00.000Z"
+    };
+
+    const response = await request(createFundingTestApp(domainService))
+      .post("/api/v1/invoices/invoice-1/marketplace-submissions")
+      .send(payload)
+      .expect(201);
+
+    expect(domainService.submitInvoiceToMarketplace).toHaveBeenCalledWith(
+      {
+        userId: "user-1",
+        participantRole: "INVESTOR",
+        organizationRole: "MEMBER"
+      },
+      "invoice-1",
+      payload
+    );
+    expect(response.body).toEqual({
+      data: {
+        invoiceId: "invoice-1",
+        financeabilityId: "financeability-1",
+        fundingOfferId: "offer-1",
+        fundingStatus: "LISTED",
+        offeredAmount: 45000,
+        yieldApr: 0.12,
+        reserveRate: 0.1,
+        expiresAt: "2026-09-01T00:00:00.000Z"
       }
     });
   });

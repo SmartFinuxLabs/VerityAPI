@@ -5,6 +5,19 @@ import { readAuthContext, readBodyRecord } from "./route-utils.js";
 export function createFundingRouter(domainService: Phase1DomainService = supabasePhase1DomainService) {
   const router = Router();
 
+  router.post("/invoices/:invoiceId/marketplace-submissions", async (req, res, next) => {
+    try {
+      const data = await domainService.submitInvoiceToMarketplace(
+        readAuthContext(res.locals.auth),
+        req.params.invoiceId,
+        readBodyRecord(req.body)
+      );
+      res.status(201).json({ data });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   router.post("/financeability/:financeabilityId/offers", async (req, res, next) => {
     try {
       const data = await domainService.createFundingOffer(readAuthContext(res.locals.auth), {

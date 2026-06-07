@@ -34,6 +34,7 @@ describe("Supabase workspace state service", () => {
       ])
     );
     const organizationsOrder = jest.fn(() => queryResult([]));
+    const offersOrder = jest.fn(() => queryResult([]));
 
     const client = {
       from: jest.fn((table: string) => {
@@ -66,6 +67,16 @@ describe("Supabase workspace state service", () => {
                 eq: jest.fn(() => ({
                   order: organizationsOrder
                 }))
+              }))
+            }))
+          };
+        }
+
+        if (table === "funding_offers") {
+          return {
+            select: jest.fn(() => ({
+              in: jest.fn(() => ({
+                order: offersOrder
               }))
             }))
           };
@@ -196,6 +207,132 @@ describe("Supabase workspace state service", () => {
     });
     expect(client.from).toHaveBeenCalledWith("organizations");
     expect(organizationsOrder).toHaveBeenCalledWith("legal_name", { ascending: true });
+  });
+
+  it("maps persisted open funding offers into supplier invoice funding status on reload", async () => {
+    const partyMembershipsOrder = jest.fn(() => queryResult([{ organization_id: "supplier-org-1" }]));
+    const invoicesOrder = jest.fn(() =>
+      queryResult([
+        {
+          id: "invoice-listed-1",
+          invoice_number: "INV-LISTED-001",
+          relationship_id: "rel-1",
+          supplier_id: "supplier-org-1",
+          buyer_id: "buyer-org-1",
+          gross_amount: "50000.00",
+          accepted_amount: "50000.00",
+          currency: "USDC",
+          state: "FACTORING_REQUESTED",
+          issue_date: "2026-06-02",
+          due_date: "2026-08-02",
+          metadata: {},
+          buyer: { legal_name: "Space Exploration Technologies Corp." },
+          supplier: { legal_name: "Materion Corp" }
+        }
+      ])
+    );
+    const organizationsOrder = jest.fn(() => queryResult([]));
+    const offersOrder = jest.fn(() =>
+      queryResult([
+        {
+          id: "funding-offer-1",
+          financeability_id: "financeability-1",
+          offered_amount: "45000.00",
+          yield_apr: 0.12,
+          reserve_rate: 0.1,
+          status: "OPEN",
+          created_at: "2026-06-06T12:00:00.000Z",
+          financeability: {
+            id: "financeability-1",
+            invoice_id: "invoice-listed-1",
+            eligible_amount: "45000.00",
+            status: "ELIGIBLE"
+          }
+        }
+      ])
+    );
+    const fundingOfferInvoiceFilter = jest.fn((_column: string, ids: unknown[]) => {
+      expect(ids).toEqual(["invoice-listed-1"]);
+      return {
+        order: offersOrder
+      };
+    });
+
+    const client = {
+      from: jest.fn((table: string) => {
+        if (table === "party_memberships") {
+          return {
+            select: jest.fn(() => ({
+              eq: jest.fn(() => ({
+                eq: jest.fn(() => ({
+                  order: partyMembershipsOrder
+                }))
+              }))
+            }))
+          };
+        }
+
+        if (table === "invoices") {
+          return {
+            select: jest.fn(() => ({
+              in: jest.fn(() => ({
+                order: invoicesOrder
+              }))
+            }))
+          };
+        }
+
+        if (table === "organizations") {
+          return {
+            select: jest.fn(() => ({
+              eq: jest.fn(() => ({
+                eq: jest.fn(() => ({
+                  order: organizationsOrder
+                }))
+              }))
+            }))
+          };
+        }
+
+        if (table === "funding_offers") {
+          return {
+            select: jest.fn(() => ({
+              in: fundingOfferInvoiceFilter
+            }))
+          };
+        }
+
+        throw new Error(`Unexpected table ${table}`);
+      })
+    } as unknown as SupabaseWorkspaceClient;
+
+    const service = createSupabaseWorkspaceService({
+      url: "https://supabase.test",
+      serviceRoleKey: "service-role-key",
+      createClient: jest.fn(() => client)
+    });
+
+    const state = await service.getSupplierWorkspaceState({
+      userId: "supplier-user-1",
+      participantRole: "SUPPLIER",
+      organizationRole: "SUPER_USER"
+    });
+
+    expect(state.invoices).toEqual([
+      expect.objectContaining({
+        id: "invoice-listed-1",
+        invoiceNumber: "INV-LISTED-001",
+        status: "FACTORING_REQUESTED",
+        financeabilityId: "financeability-1",
+        fundingOfferId: "funding-offer-1",
+        fundingStatus: "LISTED",
+        offeredAmount: 45000,
+        yieldApr: 0.12,
+        reserveRate: 0.1,
+        marketplaceSubmittedAt: "2026-06-06T12:00:00.000Z"
+      })
+    ]);
+    expect(fundingOfferInvoiceFilter).toHaveBeenCalledWith("financeability.invoice_id", ["invoice-listed-1"]);
   });
 
   it("maps buyer workspace invoices with supplier legal names and invoice numbers", async () => {
@@ -934,6 +1071,132 @@ describe("Supabase workspace state service", () => {
     expect(analytics.creditHistory).toEqual([
       { period: "2026-04", score: 610 },
       { period: "2026-05", score: 610 },
+    ]);
+  });
+
+  it("returns open marketplace funding offers in investor workspace state", async () => {
+    const partyMembershipsOrder = jest.fn(() => queryResult([{ organization_id: "investor-org-1" }]));
+    const commitmentsOrder = jest.fn(() => queryResult([]));
+    const ledgerOrder = jest.fn(() => queryResult([]));
+    const offersOrder = jest.fn(() =>
+      queryResult([
+        {
+          id: "offer-1",
+          financeability_id: "financeability-1",
+          offered_amount: "45000.00",
+          yield_apr: 0.12,
+          reserve_rate: 0.1,
+          settlement_currency: "USDC",
+          status: "OPEN",
+          expires_at: "2026-09-01T00:00:00.000Z",
+          financeability: {
+            id: "financeability-1",
+            invoice_id: "invoice-1",
+            eligible_amount: "45000.00",
+            status: "ELIGIBLE",
+            invoice: {
+              id: "invoice-1",
+              invoice_number: "INV-MKT-001",
+              supplier_id: "supplier-org-1",
+              buyer_id: "buyer-org-1",
+              gross_amount: "50000.00",
+              accepted_amount: "50000.00",
+              state: "ACCEPTED",
+              issue_date: "2026-06-01",
+              due_date: "2026-08-01",
+              metadata: {
+                poNumber: "PO-MKT-001",
+                goodsReceiptNumber: "GR-MKT-001",
+                itemDescription: "Industrial Sensors"
+              },
+              supplier: { legal_name: "Materion Corp" },
+              buyer: { legal_name: "Space Exploration Technologies Corp." }
+            }
+          }
+        }
+      ])
+    );
+
+    const client = {
+      from: jest.fn((table: string) => {
+        if (table === "party_memberships") {
+          return {
+            select: jest.fn(() => ({
+              eq: jest.fn(() => ({
+                eq: jest.fn(() => ({
+                  order: partyMembershipsOrder
+                }))
+              }))
+            }))
+          };
+        }
+
+        if (table === "funding_commitments") {
+          return {
+            select: jest.fn(() => ({
+              in: jest.fn(() => ({
+                order: commitmentsOrder
+              }))
+            }))
+          };
+        }
+
+        if (table === "settlement_ledger_entries") {
+          return {
+            select: jest.fn(() => ({
+              in: jest.fn(() => ({
+                order: ledgerOrder
+              }))
+            }))
+          };
+        }
+
+        if (table === "funding_offers") {
+          return {
+            select: jest.fn(() => ({
+              eq: jest.fn(() => ({
+                order: offersOrder
+              }))
+            }))
+          };
+        }
+
+        throw new Error(`Unexpected table ${table}`);
+      })
+    } as unknown as SupabaseWorkspaceClient;
+
+    const service = createSupabaseWorkspaceService({
+      url: "https://supabase.test",
+      serviceRoleKey: "service-role-key",
+      createClient: jest.fn(() => client)
+    });
+
+    const state = await service.getInvestorWorkspaceState({
+      userId: "investor-user-1",
+      accessToken: "investor-token",
+      participantRole: "INVESTOR",
+      organizationRole: "MEMBER"
+    });
+
+    expect(state.invoices).toEqual([
+      expect.objectContaining({
+        id: "INV-MKT-001",
+        invoiceId: "invoice-1",
+        invoiceNumber: "INV-MKT-001",
+        fundingOfferId: "offer-1",
+        financeabilityId: "financeability-1",
+        supplier: "Materion Corp",
+        obligor: "Space Exploration Technologies Corp.",
+        faceValue: 50000,
+        offeredAmount: 45000,
+        discount: 12,
+        maturity: expect.any(Number),
+        status: "Available",
+        fundingStatus: "LISTED",
+        poNumber: "PO-MKT-001",
+        grnWarehouse: "GR-MKT-001",
+        description: "Industrial Sensors"
+      })
     ]);
   });
 });

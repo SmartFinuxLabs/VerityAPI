@@ -159,6 +159,12 @@ export function validateFundingOfferCommand(body: BodyRecord) {
   requireIsoTimestamp(body, "expiresAt");
 }
 
+export function validateMarketplaceSubmissionCommand(body: BodyRecord) {
+  requirePositiveNumber(body, "offeredAmount");
+  requireAssetCode(body, "settlementCurrency");
+  requireIsoTimestamp(body, "expiresAt");
+}
+
 export function validateFundingCommitmentCommand(body: BodyRecord) {
   requireString(body, "investorId");
   requirePositiveNumber(body, "committedAmount");
