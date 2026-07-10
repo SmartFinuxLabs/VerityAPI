@@ -6,20 +6,32 @@ import { fundingRouter } from "./funding.js";
 import { healthRouter } from "./health.js";
 import { invoicesRouter } from "./invoices.js";
 import { onboardingRouter } from "./onboarding.js";
+import { createOpenApiRouter } from "./openapi.js";
 import { relationshipsRouter } from "./relationships.js";
 import { settlementRouter } from "./settlement.js";
 import { workspacesRouter } from "./workspaces.js";
 
-export const apiRouter = Router();
+export type ApiRouterOptions = {
+  nodeEnv: string;
+};
 
-apiRouter.use(healthRouter);
-apiRouter.use(authRouter);
-apiRouter.use(requireAuth);
-apiRouter.use(blockViewerMutations);
-apiRouter.use(workspacesRouter);
-apiRouter.use(onboardingRouter);
-apiRouter.use(relationshipsRouter);
-apiRouter.use(invoicesRouter);
-apiRouter.use(fundingRouter);
-apiRouter.use(settlementRouter);
-apiRouter.use(auditRouter);
+export function createApiRouter(options: ApiRouterOptions) {
+  const router = Router();
+
+  router.use(healthRouter);
+  router.use(authRouter);
+  router.use(createOpenApiRouter({ protected: options.nodeEnv === "production" }));
+  router.use(requireAuth);
+  router.use(blockViewerMutations);
+  router.use(workspacesRouter);
+  router.use(onboardingRouter);
+  router.use(relationshipsRouter);
+  router.use(invoicesRouter);
+  router.use(fundingRouter);
+  router.use(settlementRouter);
+  router.use(auditRouter);
+
+  return router;
+}
+
+export const apiRouter = createApiRouter({ nodeEnv: "development" });

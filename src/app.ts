@@ -6,16 +6,21 @@ import { env } from "./config/env.js";
 import { correlationId } from "./middleware/correlation-id.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { notFoundHandler } from "./middleware/not-found.js";
-import { apiRouter } from "./routes/index.js";
+import { createApiRouter } from "./routes/index.js";
 
-export function createApp() {
+export type CreateAppOptions = {
+  nodeEnv?: string;
+};
+
+export function createApp(options: CreateAppOptions = {}) {
   const app = express();
+  const nodeEnv = options.nodeEnv ?? env.nodeEnv;
 
   app.use(helmet());
   app.use(cors());
   app.use(correlationId);
   app.use(express.json({ limit: "1mb" }));
-  app.use(morgan(env.nodeEnv === "production" ? "combined" : "dev"));
+  app.use(morgan(nodeEnv === "production" ? "combined" : "dev"));
 
   app.get("/", (_req, res) => {
     res.json({
@@ -26,7 +31,7 @@ export function createApp() {
     });
   });
 
-  app.use(env.apiBasePath, apiRouter);
+  app.use(env.apiBasePath, createApiRouter({ nodeEnv }));
   app.use(notFoundHandler);
   app.use(errorHandler);
 
